@@ -12,9 +12,29 @@ function toTurnChar(c: Color) {
   return c === "white" ? "w" : "b";
 }
 
+
+function uciToMove(uci: string) {
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  const promotion = uci.length === 5 ? uci[4] : undefined; // q r b n
+  return { from, to, promotion };
+}
+
+async function fetchBotMove(fen: string, movetimeMs: number) {
+  const res = await fetch("/api/move", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fen, movetime_ms: movetimeMs }),
+  });
+  if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
+  const data = await res.json();
+  return data.uci as string | null;
+}
+
+
 export default function App() {
   const gameRef = useRef(new Chess());
-
+  const [movetimeMs, setMovetimeMs] = useState(200);
   const [playerColor, setPlayerColor] = useState<Color>("white");
   const [fen, setFen] = useState(gameRef.current.fen());
   const [busy, setBusy] = useState(false);
@@ -36,30 +56,40 @@ export default function App() {
     return gameRef.current.turn() === toTurnChar(botColor);
   }
 
-  function pickRandomBotMove() {
-    const moves = gameRef.current.moves({ verbose: true });
-    if (moves.length === 0) return null;
-    return moves[Math.floor(Math.random() * moves.length)];
-  }
+const inFlightRef = useRef(false);
 
-  async function makeBotMoveIfNeeded() {
-    if (!isBotsTurn()) return;
+async function makeBotMoveIfNeeded() {
+  if (!isBotsTurn()) return;
+  if (inFlightRef.current) return;
 
-    setBusy(true);
-    // Simula “pensar” un toque (también ayuda a que se vea el move del usuario antes)
-    await new Promise((r) => setTimeout(r, 150));
+  inFlightRef.current = true;
+  setBusy(true);
+  try {
+    const fen = gameRef.current.fen();
+    const res = await fetch("/api/move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen, movetime_ms: 200 }),
+    });
+    const data = await res.json();
+    const uci = data.uci as string | null;
+    if (!uci) return;
 
-    // TODO: reemplazá esto por tu bot local (fetch a tu backend)
-    const m = pickRandomBotMove();
-    if (!m) {
-      setBusy(false);
-      return;
-    }
-
-    gameRef.current.move(m);
+    gameRef.current.move({
+      from: uci.slice(0,2),
+      to: uci.slice(2,4),
+      promotion: uci.length === 5 ? uci[4] : "q",
+    });
     setFen(gameRef.current.fen());
+  } catch (e) {
+    console.error(e);
+  } finally {
     setBusy(false);
+    inFlightRef.current = false;
   }
+}
+
+
 
   const chessboardOptions = useMemo(() => {
     return {
@@ -110,23 +140,33 @@ export default function App() {
   return (
     <div style={{ maxWidth: 520, margin: "24px auto", padding: 16 }}>
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <label>
+      <label>
+        movetime ms
+        <input
+          type="number"
+          min={20}
+          max={2000}
+          value={movetimeMs}
+          onChange={(e) => setMovetimeMs(Number(e.target.value))}
+          style={{ width: 90, marginLeft: 8 }}
+          disabled={busy}
+        />
+
           Jugás:
           <select
             value={playerColor}
             onChange={(e) => {
               const next = e.target.value as Color;
-              // Reinicio para evitar estados raros al cambiar de lado
               resetGame(next);
-              // Si elegís negras, el bot (blancas) arranca
-              setTimeout(() => void makeBotMoveIfNeeded(), 0);
+              setTimeout(() => void makeBotMoveExplicit(opposite(next)), 0);
             }}
             style={{ marginLeft: 8 }}
           >
             <option value="white">Blancas</option>
             <option value="black">Negras</option>
           </select>
-        </label>
+      </label>
+
 
         <button onClick={() => resetGame(playerColor)}>Reiniciar</button>
 

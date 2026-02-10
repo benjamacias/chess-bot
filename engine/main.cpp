@@ -595,6 +595,50 @@ struct Board {
     key_hist.push_back(key);
   }
 
+  bool has_non_pawn_material(Color c) const {
+  for (int i = 0; i < 64; i++) {
+    int8_t p = sq[i];
+    if (!p) continue;
+    if (color_of(p) != c) continue;
+    int ap = abs_piece(p);
+    if (ap != KING && ap != PAWN) return true;
+    }
+    return false;
+  }
+
+  void make_null(Undo& u) {
+    u.castling = castling;
+    u.ep = ep;
+    u.halfmove = halfmove;
+    u.fullmove = fullmove;
+    u.key = key;
+
+    // remove old state hashes
+    key ^= Z_CASTLE[castling & 15];
+    if (ep != -1) key ^= Z_EPFILE[file_of(ep)];
+
+    ep = -1;
+    halfmove++;
+
+    // add new state hashes
+    key ^= Z_CASTLE[castling & 15];
+    // ep none
+    side = (side == WHITE ? BLACK : WHITE);
+    key ^= Z_SIDE;
+
+    key_hist.push_back(key);
+  }
+
+  void unmake_null(const Undo& u) {
+    side = (side == WHITE ? BLACK : WHITE); // restore side toggle effect
+    castling = u.castling;
+    ep = u.ep;
+    halfmove = u.halfmove;
+    fullmove = u.fullmove;
+    key = u.key;
+    key_hist.pop_back();
+  }
+
   void unmake_move(const Move& m, const Undo& u) {
     // restore by reversing board state the same as before
     side = (side == WHITE ? BLACK : WHITE);
@@ -674,6 +718,156 @@ static void perft_divide(Board& b, int depth) {
   }
   cout << "Total: " << total << "\n";
 }
+
+
+static bool find_move_ft(const vector<Move>& legal, int from, int to, int promo, Move& out) {
+  for (const auto& m : legal) {
+    if (m.from == from && m.to == to && m.promo == promo) { out = m; return true; }
+  }
+  return false;
+}
+
+static bool opening_policy(Board& b, Move& out) {
+  int ply = (b.fullmove - 1) * 2 + (b.side == BLACK ? 1 : 0);
+  if (ply > 12) return false;
+
+  // Si estás en jaque, que el search resuelva (evita “book suicida”)
+  if (b.in_check(b.side)) return false;
+
+  vector<Move> legal;
+  b.gen_legal(legal);
+
+  // Si hay capturas disponibles, salí del book y que calcule (evita absurdos)
+  for (const auto& m : legal) {
+    if (m.flags & Move::CAPTURE) return false;
+  }
+
+  auto pick = [&](initializer_list<tuple<const char*, const char*, int>> list) -> bool {
+    for (auto &t : list) {
+      int from = str_to_sq(string(get<0>(t)));
+      int to   = str_to_sq(string(get<1>(t)));
+      int promo = get<2>(t);
+      if (from >= 0 && to >= 0 && find_move_ft(legal, from, to, promo, out)) return true;
+    }
+    return false;
+  };
+
+  auto has = [&](const char* sq, int8_t p) -> bool {
+    int s = str_to_sq(string(sq));
+    return (s >= 0 && b.sq[s] == p);
+  };
+
+  // Flags de estructura
+  bool w_e4 = has("e4", (int8_t)PAWN);
+  bool w_d4 = has("d4", (int8_t)PAWN);
+  bool w_c4 = has("c4", (int8_t)PAWN);
+  bool w_e5 = has("e5", (int8_t)PAWN);
+
+  bool b_e5 = has("e5", (int8_t)(-PAWN));
+  bool b_c6 = has("c6", (int8_t)(-PAWN));
+  bool b_d5 = has("d5", (int8_t)(-PAWN));
+  bool b_e6 = has("e6", (int8_t)(-PAWN));
+
+  // Debug opcional (te deja ver cuándo está usando book)
+  // cout << "info string book\n";
+
+  // =========================
+  // BLANCAS (agresivo)
+  // =========================
+  if (b.side == WHITE) {
+    if (ply == 0) return pick({ {"e2","e4",EMPTY} });
+
+    // vs Caro-Kann (...c6): Advance (d4, e5) + desarrollo
+    if (w_e4 && b_c6) {
+      if (!w_d4) return pick({ {"d2","d4",EMPTY} });
+      if (w_d4 && b_d5 && !w_e5) return pick({ {"e4","e5",EMPTY} });
+
+      // desarrollo “fuerte” pero razonable (sin rarezas)
+      return pick({
+        {"g1","f3",EMPTY},
+        {"b1","c3",EMPTY},
+        {"f1","d3",EMPTY},
+        {"c2","c3",EMPTY},
+        {"e1","g1",EMPTY}
+      });
+    }
+
+    // vs ...e5: Italiano con d4 temprano (agresivo pero sano)
+    if (w_e4 && b_e5) {
+      // Nf3, Bc4, d4 (si existe), O-O, Nc3
+      if (has("g1",(int8_t)KNIGHT)) return pick({ {"g1","f3",EMPTY} });
+      if (has("f1",(int8_t)BISHOP)) return pick({ {"f1","c4",EMPTY} });
+
+      // d4 como plan agresivo (si todavía está el peón en d2)
+      if (has("d2",(int8_t)PAWN) && !w_d4) return pick({ {"d2","d4",EMPTY} });
+
+      return pick({
+        {"e1","g1",EMPTY},
+        {"b1","c3",EMPTY},
+        {"d2","d3",EMPTY}
+      });
+    }
+
+    // Si por transposición abriste d4: Queen’s Gambit setup agresivo-lite
+    if (w_d4) {
+      if (!w_c4) return pick({ {"c2","c4",EMPTY} });
+      return pick({
+        {"g1","f3",EMPTY},
+        {"b1","c3",EMPTY},
+        {"e2","e3",EMPTY},
+        {"f1","d3",EMPTY},
+        {"e1","g1",EMPTY}
+      });
+    }
+
+    return false;
+  }
+
+  // =========================
+  // NEGRAS (sólido/pasivo)
+  // =========================
+  // vs 1.e4: Caro-Kann sólido
+  if (w_e4) {
+    if (!b_c6 && has("c7",(int8_t)(-PAWN))) return pick({ {"c7","c6",EMPTY} });
+    if (b_c6) {
+      if (w_d4 && !b_d5 && has("d7",(int8_t)(-PAWN))) return pick({ {"d7","d5",EMPTY} });
+      if (!b_e6 && has("e7",(int8_t)(-PAWN))) return pick({ {"e7","e6",EMPTY} });
+
+      // desarrollo y enroque (sin ...c5 temprana)
+      return pick({
+        {"g8","f6",EMPTY},
+        {"b8","d7",EMPTY},
+        {"f8","e7",EMPTY},
+        {"e8","g8",EMPTY}
+      });
+    }
+    return false;
+  }
+
+  // vs 1.d4: QGD/Semi-Slav sólido
+  if (w_d4) {
+    if (!b_d5 && has("d7",(int8_t)(-PAWN))) return pick({ {"d7","d5",EMPTY} });
+    if (w_c4 && !b_e6 && has("e7",(int8_t)(-PAWN))) return pick({ {"e7","e6",EMPTY} });
+
+    // desarrollo y enroque
+    if (pick({ {"g8","f6",EMPTY} })) return true;
+    if (pick({ {"f8","e7",EMPTY} })) return true;
+    if (pick({ {"e8","g8",EMPTY} })) return true;
+
+    // Semi-Slav: ...c6
+    if (has("c7",(int8_t)(-PAWN))) return pick({ {"c7","c6",EMPTY} });
+
+    return pick({
+      {"b8","d7",EMPTY},
+      {"b8","c6",EMPTY}
+    });
+  }
+
+  return false;
+}
+
+
+
 
 // ---------------- UCI helpers ----------------
 static vector<string> split_ws(const string& s) {
@@ -760,19 +954,111 @@ static int choose_movetime_ms(const Board& b, const GoParams& p) {
 }
 
 // ---------------- Eval ----------------
-static constexpr int PIECE_VAL[7] = {0, 100, 320, 330, 500, 900, 0};
+static constexpr int PV[7] = {0, 100, 320, 330, 500, 900, 0};
+
+static inline int center_bonus(int sq) {
+  // bonus por cercanía al centro (d4/e4/d5/e5)
+  int f = file_of(sq), r = rank_of(sq);
+  int df = abs(f - 3) + abs(f - 4);
+  int dr = abs(r - 3) + abs(r - 4);
+  int d = min(df, dr);
+  return (3 - min(3, d)) * 6; // 0..18
+}
 
 static int eval(const Board& b) {
   int score = 0;
+
+  int wpawns_file[8] = {0}, bpawns_file[8] = {0};
+  bool wB = false, wB2 = false, bB = false, bB2 = false;
+
+  int wKingSq = -1, bKingSq = -1;
+  bool wQueenMoved = true, bQueenMoved = true;
+
   for (int sq = 0; sq < 64; sq++) {
     int8_t p = b.sq[sq];
     if (!p) continue;
-    int v = PIECE_VAL[abs_piece(p)];
-    score += (p > 0 ? v : -v);
+
+    int pt = abs_piece(p);
+    int sgn = (p > 0) ? +1 : -1;
+
+    // material
+    score += sgn * PV[pt];
+
+    // tracking
+    if (pt == PAWN) {
+      if (p > 0) wpawns_file[file_of(sq)]++;
+      else bpawns_file[file_of(sq)]++;
+    } else if (pt == BISHOP) {
+      if (p > 0) { if (!wB) wB = true; else wB2 = true; }
+      else { if (!bB) bB = true; else bB2 = true; }
+    } else if (pt == KING) {
+      if (p > 0) wKingSq = sq; else bKingSq = sq;
+    } else if (pt == QUEEN) {
+      if (p > 0 && sq == str_to_sq("d1")) wQueenMoved = false;
+      if (p < 0 && sq == str_to_sq("d8")) bQueenMoved = false;
+    }
+
+    // positional “barato”
+    if (pt == KNIGHT || pt == BISHOP) {
+      score += sgn * center_bonus(sq); // centralización
+    }
+
+    if (pt == PAWN) {
+      int r = rank_of(sq);
+      int adv = (p > 0) ? r : (7 - r); // avance relativo
+      int bonus = adv * 4; // avance de peón
+      // peones centrales (d/e)
+      int f = file_of(sq);
+      if (f == 3 || f == 4) bonus += 8;
+      score += sgn * bonus;
+    }
   }
-  // side-to-move perspective (negamax-friendly)
+
+  // bishop pair
+  if (wB && wB2) score += 25;
+  if (bB && bB2) score -= 25;
+
+  // pawn structure: doubled + isolated (simple)
+  for (int f = 0; f < 8; f++) {
+    if (wpawns_file[f] >= 2) score -= 10 * (wpawns_file[f] - 1);
+    if (bpawns_file[f] >= 2) score += 10 * (bpawns_file[f] - 1);
+
+    bool wIso = wpawns_file[f] > 0 &&
+                ( (f == 0 ? 0 : wpawns_file[f-1]) == 0 ) &&
+                ( (f == 7 ? 0 : wpawns_file[f+1]) == 0 );
+    bool bIso = bpawns_file[f] > 0 &&
+                ( (f == 0 ? 0 : bpawns_file[f-1]) == 0 ) &&
+                ( (f == 7 ? 0 : bpawns_file[f+1]) == 0 );
+
+    if (wIso) score -= 8;
+    if (bIso) score += 8;
+  }
+
+  // king safety: bonus por enrocar; penalización si no enrocó “tarde”
+  auto castled = [&](Color c, int ksq)->bool {
+    if (c == WHITE) return ksq == str_to_sq("g1") || ksq == str_to_sq("c1");
+    return ksq == str_to_sq("g8") || ksq == str_to_sq("c8");
+  };
+
+  if (wKingSq != -1) {
+    if (castled(WHITE, wKingSq)) score += 18;
+    else if (b.fullmove >= 10) score -= 18;
+  }
+  if (bKingSq != -1) {
+    if (castled(BLACK, bKingSq)) score -= 18;
+    else if (b.fullmove >= 10) score += 18;
+  }
+
+  // no salir con la dama demasiado temprano (suave)
+  if (b.fullmove <= 8) {
+    if (!wQueenMoved) score -= 8;
+    if (!bQueenMoved) score += 8;
+  }
+
+  // perspectiva del que mueve (negamax)
   return (b.side == WHITE) ? score : -score;
 }
+
 
 // ---------------- TT ----------------
 static constexpr int MATE = 30000;
@@ -843,8 +1129,8 @@ static int mvv_lva(const Board& b, const Move& m) {
   int8_t att = b.sq[m.from];
   int8_t vic = b.sq[m.to];
   if (m.flags & Move::ENPASSANT) vic = (int8_t)(b.side == WHITE ? -PAWN : PAWN);
-  int av = PIECE_VAL[abs_piece(att)];
-  int vv = PIECE_VAL[abs_piece(vic)];
+  int av = PV[abs_piece(att)];
+  int vv = PV[abs_piece(vic)];
   return vv * 10 - av;
 }
 
@@ -987,22 +1273,42 @@ static int negamax(Board& b, int depth, int alpha, int beta, SearchState& st, in
   return bestScore;
 }
 
+
 static Move search_bestmove(Board& b, int movetime_ms, int maxDepth, int& outScoreCp) {
   SearchState st;
-  st.stop = chrono::steady_clock::now() + chrono::milliseconds(movetime_ms);
+  auto start = chrono::steady_clock::now();
+  st.stop = start + chrono::milliseconds(movetime_ms);
   st.nodes = 0;
-  // history/killers default zeroed
-
   Move best{};
   uint32_t bestEnc = 0;
   int bestScore = -INF;
 
+  int prev = 0;                 // score del depth anterior para aspiration
+  const int WINDOW = 80;      // centipawns (50-80 suele ir bien)
+
   for (int depth = 1; depth <= maxDepth; depth++) {
     if (st.time_up()) break;
 
-    uint32_t pv = 0;
-    int score = negamax(b, depth, -INF, INF, st, 0, pv);
+    int alpha = -INF, beta = INF;
+    if (depth >= 2) {
+      alpha = prev - WINDOW;
+      beta  = prev + WINDOW;
+    }
+       uint32_t pv = 0;
+    int score = negamax(b, depth, alpha, beta, st, 0, pv);
+
+    // si falla la ventana y aún hay tiempo, re-search con ventana completa
+    if (!st.time_up() && depth >= 2) {
+      if (score <= alpha || score >= beta) {
+        pv = 0;
+        score = negamax(b, depth, -INF, INF, st, 0, pv);
+      }
+    }
+
     if (st.time_up()) break;
+
+    // actualizar “prev” con el score final de este depth (post re-search)
+    prev = score;
 
     if (pv != 0) {
       bestEnc = pv;
@@ -1010,10 +1316,10 @@ static Move search_bestmove(Board& b, int movetime_ms, int maxDepth, int& outSco
       best = decode_move(bestEnc);
     }
 
-    // UCI info
-    int nps = 0;
-    double sec = movetime_ms / 1000.0;
-    if (sec > 0.0) nps = (int)(st.nodes / sec);
+    // NPS real (tiempo transcurrido)
+    auto now = chrono::steady_clock::now();
+    double sec = chrono::duration<double>(now - start).count();
+    int nps = (sec > 0.0) ? (int)(st.nodes / sec) : 0;
 
     outScoreCp = bestScore;
     cout << "info depth " << depth
@@ -1024,10 +1330,13 @@ static Move search_bestmove(Board& b, int movetime_ms, int maxDepth, int& outSco
   }
 
   outScoreCp = bestScore;
-  return bestEnc ? best : Move{};
+  return best;
 }
 
-// ---------------- main ----------------
+
+
+
+  // ---------------- main ----------------
 int main(int argc, char** argv) {
   ios::sync_with_stdio(false);
   cin.tie(nullptr);
@@ -1109,8 +1418,14 @@ int main(int argc, char** argv) {
       GoParams gp = parse_go(line);
       int movetime = choose_movetime_ms(board, gp);
       int maxDepth = (gp.depth > 0 ? gp.depth : 20);
-
       int score = 0;
+
+      Move bookMove;
+      if (opening_policy(board, bookMove)) {
+        cout << "bestmove " << move_to_uci(bookMove) << "\n";
+        continue;
+      }
+
       Move bm = search_bestmove(board, movetime, maxDepth, score);
 
       // Validate best move exists; if none, 0000

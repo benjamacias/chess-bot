@@ -1,0 +1,147 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Chess } from "chess.js";
+import { Chessboard } from "react-chessboard";
+
+function uciToMove(uci) {
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  const promotion = uci.length === 5 ? uci[4] : undefined; // q r b n
+  return { from, to, promotion };
+}
+
+async function fetchBotMove(fen, movetimeMs) {
+  const res = await fetch("/api/move", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fen, movetime_ms: movetimeMs }),
+  });
+  if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
+  const data = await res.json();
+  return data.uci; // string o null
+}
+
+export default function ChessGame() {
+  const game = useMemo(() => new Chess(), []);
+  const [fen, setFen] = useState(game.fen());
+  const [playerColor, setPlayerColor] = useState("w"); // "w" o "b"
+  const [thinking, setThinking] = useState(false);
+  const [movetimeMs, setMovetimeMs] = useState(200);
+
+  const turn = fen.split(" ")[1]; // "w" o "b"
+  const isPlayersTurn = turn === playerColor;
+
+  function sync() {
+    setFen(game.fen());
+  }
+
+  async function botPlayIfNeeded() {
+    if (game.isGameOver()) return;
+    const t = game.turn(); // "w" o "b"
+    if (t === playerColor) return;
+
+    setThinking(true);
+    try {
+      const uci = await fetchBotMove(game.fen(), movetimeMs);
+      if (!uci) return;
+
+      const mv = uciToMove(uci);
+      // Si el bot promociona sin letra, default a reina
+      const result = game.move({
+        from: mv.from,
+        to: mv.to,
+        promotion: mv.promotion ?? "q",
+      });
+
+      if (!result) {
+        console.warn("Bot move inválido en UI:", uci, "fen:", game.fen());
+      }
+      sync();
+    } finally {
+      setThinking(false);
+    }
+  }
+
+  async function onPieceDrop(sourceSquare, targetSquare) {
+    // Bloqueo si no es tu turno o si el bot está pensando
+    if (thinking) return false;
+    if (!isPlayersTurn) return false;
+
+    // Promoción: default queen (para no frenar UX)
+    const isPromotion =
+      sourceSquare[1] === "7" && targetSquare[1] === "8" && game.get(sourceSquare)?.type === "p" && playerColor === "w"
+        ? true
+        : sourceSquare[1] === "2" && targetSquare[1] === "1" && game.get(sourceSquare)?.type === "p" && playerColor === "b";
+
+    const move = game.move({
+      from: sourceSquare,
+      to: targetSquare,
+      promotion: isPromotion ? "q" : undefined,
+    });
+
+    if (move === null) return false;
+
+    sync();
+    await botPlayIfNeeded();
+    return true;
+  }
+
+  function newGame(color) {
+    game.reset();
+    setPlayerColor(color);
+    sync();
+  }
+
+  // Si el usuario elige negras, el bot (blancas) juega al inicio
+  useEffect(() => {
+    // cada vez que cambia color o arranca
+    (async () => {
+      if (game.history().length === 0) {
+        await botPlayIfNeeded();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerColor]);
+
+  return (
+    <div style={{ maxWidth: 520, margin: "24px auto", fontFamily: "system-ui" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <button onClick={() => newGame("w")} disabled={thinking}>
+          Jugar Blancas
+        </button>
+        <button onClick={() => newGame("b")} disabled={thinking}>
+          Jugar Negras
+        </button>
+
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          movetime ms
+          <input
+            type="number"
+            min={20}
+            max={2000}
+            value={movetimeMs}
+            onChange={(e) => setMovetimeMs(Number(e.target.value))}
+            style={{ width: 90 }}
+            disabled={thinking}
+          />
+        </label>
+
+        <div style={{ opacity: 0.8 }}>
+          Turno: <b>{turn === "w" ? "Blancas" : "Negras"}</b>{" "}
+          {thinking ? "(pensando…)" : ""}
+        </div>
+      </div>
+
+      <Chessboard
+        position={fen}
+        onPieceDrop={onPieceDrop}
+        boardOrientation={playerColor === "w" ? "white" : "black"}
+        arePiecesDraggable={!thinking && isPlayersTurn}
+      />
+
+      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
+        FEN: {fen}
+      </div>
+    </div>
+  );
+}
+
