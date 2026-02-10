@@ -1,28 +1,34 @@
 import express from "express";
 import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import readline from "node:readline";
 
 const app = express();
 app.use(express.json());
 
-const ENGINE_PATH = "../engine/build/bm_engine";
+// Ruta absoluta al engine para que no falle por cwd
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ENGINE_PATH = path.resolve(__dirname, "../engine/build/bm_engine");
 
 const engine = spawn(ENGINE_PATH, [], { stdio: ["pipe", "pipe", "inherit"] });
 
-let buffer = "";
-let pendingResolve = null;
+// Leer stdout por líneas
+const rl = readline.createInterface({ input: engine.stdout });
 
-engine.stdout.on("data", (d) => {
-  buffer += d.toString();
-  // UCI es line-based
-  const lines = buffer.split("\n");
-  buffer = lines.pop() ?? "";
-  for (const ln of lines) {
-    const line = ln.trim();
-    if (!line) continue;
-    if (pendingResolve && (line.startsWith("bestmove ") || line === "uciok" || line === "readyok")) {
-      const r = pendingResolve;
-      pendingResolve = null;
-      r(line);
+let waiters = [];
+rl.on("line", (line) => {
+  line = line.trim();
+  if (!line) return;
+
+  // Resolver el primer waiter que haga match
+  for (let i = 0; i < waiters.length; i++) {
+    const { predicate, resolve } = waiters[i];
+    if (predicate(line)) {
+      waiters.splice(i, 1);
+      resolve(line);
+      return;
     }
   }
 });
@@ -31,48 +37,53 @@ function send(cmd) {
   engine.stdin.write(cmd + "\n");
 }
 
-function waitForOneLine(timeoutMs = 2000) {
+function waitFor(predicate, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
-      if (pendingResolve) pendingResolve = null;
+      // eliminar waiter si seguía
+      waiters = waiters.filter((w) => w.resolve !== resolve);
       reject(new Error("engine timeout"));
     }, timeoutMs);
-    pendingResolve = (line) => { clearTimeout(t); resolve(line); };
+
+    waiters.push({
+      predicate,
+      resolve: (line) => {
+        clearTimeout(t);
+        resolve(line);
+      },
+    });
   });
 }
 
-async function ensureUci() {
+async function initUci() {
   send("uci");
-  const line = await waitForOneLine();
-  if (line !== "uciok") {
-    // si no llegó justo uciok como primera respuesta, no es grave (el engine puede imprimir id first),
-    // en engine real deberías leer hasta "uciok". Lo dejamos simple por ahora.
-  }
+  await waitFor((l) => l === "uciok", 3000);
   send("isready");
-  await waitForOneLine();
+  await waitFor((l) => l === "readyok", 3000);
 }
 
-await ensureUci();
+await initUci();
+
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 app.post("/api/move", async (req, res) => {
-  const { fen, wtime_ms, btime_ms, movetime_ms } = req.body ?? {};
+  const { fen, movetime_ms = 200 } = req.body ?? {};
   if (!fen) return res.status(400).json({ error: "missing fen" });
 
-  // posición (FEN) + go con movetime si querés
-  send(`position fen ${fen}`);
-  if (movetime_ms) send(`go movetime ${movetime_ms}`);
-  else if (wtime_ms != null && btime_ms != null) send(`go wtime ${wtime_ms} btime ${btime_ms}`);
-  else send(`go movetime 200`);
-
   try {
-    const line = await waitForOneLine(5000);
-    if (!line.startsWith("bestmove ")) return res.status(500).json({ error: "bad engine response" });
-    const uci = line.split(" ")[1];
+    send(`position fen ${fen}`);
+    send(`go movetime ${movetime_ms}`);
+
+    const best = await waitFor((l) => l.startsWith("bestmove "), 5000);
+    const uci = best.split(/\s+/)[1] ?? "0000";
+
     return res.json({ uci: uci === "0000" ? null : uci });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-app.listen(8000, () => console.log("service on http://localhost:8000"));
-
+app.listen(8000, () => {
+  console.log("service on http://localhost:8000");
+  console.log("engine:", ENGINE_PATH);
+});
