@@ -1,0 +1,3 @@
+/home/benja/Documentos/chess_bot/engine/build/CMakeFiles/bm_engine.dir
+/home/benja/Documentos/chess_bot/engine/build/CMakeFiles/edit_cache.dir
+/home/benja/Documentos/chess_bot/engine/build/CMakeFiles/rebuild_cache.dir
