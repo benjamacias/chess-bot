@@ -1,5 +1,6 @@
 import express from "express";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
@@ -10,7 +11,24 @@ app.use(express.json());
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ENGINE_PATH = path.resolve(__dirname, "../engine/build/bm_engine");
+function resolveEnginePath() {
+  if (process.env.ENGINE_PATH) return process.env.ENGINE_PATH;
+
+  const candidates = [
+    path.resolve(__dirname, "../engine/build_local/bm_engine"),
+    path.resolve(__dirname, "../engine/build/bm_engine"),
+  ];
+
+  const existing = candidates
+    .filter((candidate) => fs.existsSync(candidate))
+    .map((candidate) => ({ candidate, mtime: fs.statSync(candidate).mtimeMs }));
+
+  if (existing.length === 0) return candidates[1];
+  existing.sort((a, b) => b.mtime - a.mtime);
+  return existing[0].candidate;
+}
+
+const ENGINE_PATH = resolveEnginePath();
 const STOCKFISH_PATH = process.env.STOCKFISH_PATH || "stockfish";
 
 const MOVE_TIMEOUT_MS = 5000;
@@ -365,27 +383,36 @@ app.post("/api/move", async (req, res) => {
   try {
     const result = await enqueueEngineTask(async () => {
       activeRequestId = requestId;
+      let sawBookHit = false;
+      const detachBookListener = engineClient.onLine((line) => {
+        if (line.startsWith("info string bookhit")) sawBookHit = true;
+      });
 
-      if (opts.hash_mb && opts.hash_mb !== currentHashMb) {
-        engineClient.send(`setoption name Hash value ${opts.hash_mb}`);
-        engineClient.send("isready");
-        await engineClient.waitFor((l) => l === "readyok", 3000, requestId);
-        currentHashMb = opts.hash_mb;
+      try {
+        if (opts.hash_mb && opts.hash_mb !== currentHashMb) {
+          engineClient.send(`setoption name Hash value ${opts.hash_mb}`);
+          engineClient.send("isready");
+          await engineClient.waitFor((l) => l === "readyok", 3000, requestId);
+          currentHashMb = opts.hash_mb;
+        }
+
+        engineClient.send(buildPositionCommand({ fen, moves_uci }));
+        const go = opts.depth ? `go depth ${opts.depth}` : `go movetime ${numericMoveTime}`;
+        engineClient.send(go);
+
+        const bestTimeout = Math.max(MOVE_TIMEOUT_MS, numericMoveTime + 4000);
+        const best = await engineClient.waitFor((l) => l.startsWith("bestmove "), bestTimeout, requestId);
+        const uci = best.split(/\s+/)[1] ?? "0000";
+
+        state.bestmove = uci;
+        state.bookhit = state.bookhit || sawBookHit;
+        state.active = false;
+        state.finishedAt = Date.now();
+
+        return serializeBestmove(state);
+      } finally {
+        detachBookListener();
       }
-
-      engineClient.send(buildPositionCommand({ fen, moves_uci }));
-      const go = opts.depth ? `go depth ${opts.depth}` : `go movetime ${numericMoveTime}`;
-      engineClient.send(go);
-
-      const bestTimeout = Math.max(MOVE_TIMEOUT_MS, numericMoveTime + 4000);
-      const best = await engineClient.waitFor((l) => l.startsWith("bestmove "), bestTimeout, requestId);
-      const uci = best.split(/\s+/)[1] ?? "0000";
-
-      state.bestmove = uci;
-      state.active = false;
-      state.finishedAt = Date.now();
-
-      return serializeBestmove(state);
     });
 
     console.log(`[${requestId}] move:done bestmove=${result.uci ?? "null"} bookhit=${result.bookhit}`);
