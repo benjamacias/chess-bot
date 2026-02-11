@@ -1,40 +1,17 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 
 const LEVEL_PRESETS = {
-  rapido: {
-    label: "Rápido",
-    skill: "blitz",
-    minMovetimeMs: 150,
-    maxMovetimeMs: 250,
-    depth: undefined,
-    hashMb: 64,
-  },
-  medio: {
-    label: "Medio",
-    skill: "rapid",
-    minMovetimeMs: 500,
-    maxMovetimeMs: 800,
-    depth: undefined,
-    hashMb: 96,
-  },
-  fuerte: {
-    label: "Fuerte",
-    skill: "strong",
-    minMovetimeMs: 1200,
-    maxMovetimeMs: 2000,
-    depth: 10,
-    hashMb: 192,
-  },
+  rapido: { label: "Rápido", skill: "blitz", minMovetimeMs: 150, maxMovetimeMs: 250, depth: undefined, hashMb: 64 },
+  medio: { label: "Medio", skill: "rapid", minMovetimeMs: 500, maxMovetimeMs: 800, depth: undefined, hashMb: 96 },
+  fuerte: { label: "Fuerte", skill: "strong", minMovetimeMs: 1200, maxMovetimeMs: 2000, depth: 10, hashMb: 192 },
 };
+
 const NO_PROGRESS_TIMEOUT_MS = 3000;
 
 function uciToMove(uci) {
-  const from = uci.slice(0, 2);
-  const to = uci.slice(2, 4);
-  const promotion = uci.length === 5 ? uci[4] : undefined; // q r b n
-  return { from, to, promotion };
+  return { from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.length === 5 ? uci[4] : undefined };
 }
 
 function createRequestId() {
@@ -46,20 +23,26 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-async function fetchBotMove(fen, options, requestId, signal) {
+function historyToUci(game) {
+  return game
+    .history({ verbose: true })
+    .map((m) => `${m.from}${m.to}${m.promotion ?? ""}`);
+}
+
+function makeCacheKey(fen, movesUci) {
+  return `${fen}|${movesUci.join(" ")}`;
+}
+
+async function fetchBotMove({ fen, movesUci, options, requestId, signal }) {
   const { skill, movetime_ms, depth, hash_mb } = options;
   const res = await fetch("/api/move", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-request-id": requestId,
-    },
+    headers: { "Content-Type": "application/json", "x-request-id": requestId },
     signal,
-    body: JSON.stringify({ fen, skill, movetime_ms, depth, hash_mb }),
+    body: JSON.stringify({ fen, moves_uci: movesUci, skill, movetime_ms, depth, hash_mb }),
   });
   if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
-  const data = await res.json();
-  return data.uci; // string o null
+  return res.json();
 }
 
 async function fetchMoveStatus(requestId) {
@@ -68,22 +51,28 @@ async function fetchMoveStatus(requestId) {
   return res.json();
 }
 
+async function fetchHint({ fen, movesUci, multipv, movetimeMs, signal }) {
+  const res = await fetch("/api/hint", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({ fen, moves_uci: movesUci, multipv, movetime_ms: movetimeMs }),
+  });
+  if (!res.ok) throw new Error(`api/hint failed: ${res.status}`);
+  return res.json();
+}
+
 function formatEvaluation(score) {
   if (!score) return "—";
-  if (score.type === "cp") {
-    const pawns = score.value / 100;
-    return `${pawns >= 0 ? "+" : ""}${pawns.toFixed(2)}`;
-  }
-  if (score.type === "mate") {
-    return `Mate ${score.value >= 0 ? "+" : ""}${score.value}`;
-  }
+  if (score.type === "cp") return `${score.value >= 0 ? "+" : ""}${(score.value / 100).toFixed(2)}`;
+  if (score.type === "mate") return `Mate ${score.value >= 0 ? "+" : ""}${score.value}`;
   return "—";
 }
 
 export default function ChessGame() {
   const game = useMemo(() => new Chess(), []);
   const [fen, setFen] = useState(game.fen());
-  const [playerColor, setPlayerColor] = useState("w"); // "w" o "b"
+  const [playerColor, setPlayerColor] = useState("w");
   const [thinking, setThinking] = useState(false);
   const [level, setLevel] = useState("rapido");
   const [movetimeMs, setMovetimeMs] = useState(200);
@@ -91,15 +80,18 @@ export default function ChessGame() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [engineStatus, setEngineStatus] = useState({ depth: null, score: null, pv: "", lastInfoAt: null });
   const [engineError, setEngineError] = useState("");
+  const [showHint, setShowHint] = useState(true);
+  const [hintData, setHintData] = useState({ best: null, lines: [] });
 
-  const turn = fen.split(" ")[1]; // "w" o "b"
+  const inFlightControllersRef = useRef(new Set());
+  const prefetchCacheRef = useRef(new Map());
+
+  const turn = fen.split(" ")[1];
   const isPlayersTurn = turn === playerColor;
   const levelPreset = LEVEL_PRESETS[level] ?? LEVEL_PRESETS.rapido;
 
   const noProgressReported =
-    thinking &&
-    thinkingStartedAt &&
-    Date.now() - (engineStatus.lastInfoAt ?? thinkingStartedAt) >= NO_PROGRESS_TIMEOUT_MS;
+    thinking && thinkingStartedAt && Date.now() - (engineStatus.lastInfoAt ?? thinkingStartedAt) >= NO_PROGRESS_TIMEOUT_MS;
 
   useEffect(() => {
     if (!thinking || !thinkingStartedAt) {
@@ -108,30 +100,132 @@ export default function ChessGame() {
     }
 
     setElapsedMs(Date.now() - thinkingStartedAt);
-    const timer = setInterval(() => {
-      setElapsedMs(Date.now() - thinkingStartedAt);
-    }, 250);
-
+    const timer = setInterval(() => setElapsedMs(Date.now() - thinkingStartedAt), 250);
     return () => clearInterval(timer);
   }, [thinking, thinkingStartedAt]);
+
+  useEffect(() => {
+    setMovetimeMs(levelPreset.minMovetimeMs);
+  }, [levelPreset.minMovetimeMs]);
+
+  useEffect(() => {
+    return () => {
+      for (const controller of inFlightControllersRef.current) controller.abort();
+      inFlightControllersRef.current.clear();
+    };
+  }, []);
 
   function sync() {
     setFen(game.fen());
   }
 
+  function abortAllRequests() {
+    for (const controller of inFlightControllersRef.current) controller.abort();
+    inFlightControllersRef.current.clear();
+  }
+
+  function addController(controller) {
+    inFlightControllersRef.current.add(controller);
+    return () => inFlightControllersRef.current.delete(controller);
+  }
+
+  async function refreshHintAndPrefetch() {
+    if (!showHint || !isPlayersTurn || game.isGameOver()) {
+      setHintData({ best: null, lines: [] });
+      return;
+    }
+
+    const historyUci = historyToUci(game);
+    const hintController = new AbortController();
+    const cleanupHint = addController(hintController);
+
+    try {
+      const hint = await fetchHint({
+        fen: game.fen(),
+        movesUci: historyUci,
+        multipv: 3,
+        movetimeMs: 100,
+        signal: hintController.signal,
+      });
+      setHintData({ best: hint.best ?? null, lines: hint.lines ?? [] });
+
+      const candidates = (hint.lines ?? []).slice(0, 3).map((line) => line.uci).filter(Boolean);
+      for (const candidateMove of candidates) {
+        const preview = new Chess(game.fen());
+        const parsed = uciToMove(candidateMove);
+        const candidateApplied = preview.move({ from: parsed.from, to: parsed.to, promotion: parsed.promotion ?? "q" });
+        if (!candidateApplied) continue;
+
+        const movesUci2 = [...historyUci, candidateMove];
+        const fenAfterCandidate = preview.fen();
+        const key = makeCacheKey(fenAfterCandidate, movesUci2);
+        if (prefetchCacheRef.current.has(key)) continue;
+
+        const moveController = new AbortController();
+        const cleanupMove = addController(moveController);
+        try {
+          const response = await fetchBotMove({
+            fen: fenAfterCandidate,
+            movesUci: movesUci2,
+            options: {
+              skill: levelPreset.skill,
+              movetime_ms: 120,
+              depth: undefined,
+              hash_mb: levelPreset.hashMb,
+            },
+            requestId: createRequestId(),
+            signal: moveController.signal,
+          });
+
+          if (response?.uci) {
+            prefetchCacheRef.current.set(key, {
+              uci: response.uci,
+              createdAt: Date.now(),
+            });
+          }
+        } catch {
+          // ignore prefetch failures
+        } finally {
+          cleanupMove();
+        }
+      }
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        setHintData({ best: null, lines: [] });
+      }
+    } finally {
+      cleanupHint();
+    }
+  }
+
   async function botPlayIfNeeded() {
     if (game.isGameOver()) return;
-    const t = game.turn(); // "w" o "b"
-    if (t === playerColor) return;
+    if (game.turn() === playerColor) return;
 
-    const timeoutMs = Math.max(movetimeMs + 1500, 2500);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const historyUci = historyToUci(game);
+    const key = makeCacheKey(game.fen(), historyUci);
+    const cached = prefetchCacheRef.current.get(key);
 
     setThinking(true);
     setThinkingStartedAt(Date.now());
     setEngineStatus({ depth: null, score: null, pv: "", lastInfoAt: null });
     setEngineError("");
+
+    if (cached?.uci) {
+      const mv = uciToMove(cached.uci);
+      const result = game.move({ from: mv.from, to: mv.to, promotion: mv.promotion ?? "q" });
+      if (result) {
+        sync();
+        setThinking(false);
+        await refreshHintAndPrefetch();
+        return;
+      }
+    }
+
+    const timeoutMs = Math.max(movetimeMs + 1500, 2500);
+    const controller = new AbortController();
+    const cleanupController = addController(controller);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     const requestId = createRequestId();
     let pollTimer = null;
@@ -141,88 +235,64 @@ export default function ChessGame() {
       if (!keepPolling) return;
       try {
         const status = await fetchMoveStatus(requestId);
-        setEngineStatus({
-          depth: status.depth,
-          score: status.score,
-          pv: status.pv,
-          lastInfoAt: status.lastInfoAt,
-        });
+        setEngineStatus({ depth: status.depth, score: status.score, pv: status.pv, lastInfoAt: status.lastInfoAt });
       } catch {
-        // ignore polling errors to avoid romper flujo del juego
+        // ignore
       } finally {
-        if (keepPolling) {
-          pollTimer = setTimeout(pollStatus, 250);
-        }
+        if (keepPolling) pollTimer = setTimeout(pollStatus, 250);
       }
     };
-
     pollTimer = setTimeout(pollStatus, 100);
 
     try {
-      const movetimeMs = randomInt(levelPreset.minMovetimeMs, levelPreset.maxMovetimeMs);
-      const uci = await fetchBotMove(
-        game.fen(),
-        {
+      const realMovetime = randomInt(levelPreset.minMovetimeMs, levelPreset.maxMovetimeMs);
+      const response = await fetchBotMove({
+        fen: game.fen(),
+        movesUci: historyUci,
+        options: {
           skill: levelPreset.skill,
-          movetime_ms: movetimeMs,
+          movetime_ms: realMovetime,
           depth: levelPreset.depth,
           hash_mb: levelPreset.hashMb,
         },
         requestId,
-        controller.signal
-      );
-      if (!uci) {
+        signal: controller.signal,
+      });
+
+      if (!response?.uci) {
         setEngineError("No se pudo obtener una jugada del motor. Intentá nuevamente.");
         return;
       }
 
-      const mv = uciToMove(uci);
-      // Si el bot promociona sin letra, default a reina
-      const result = game.move({
-        from: mv.from,
-        to: mv.to,
-        promotion: mv.promotion ?? "q",
-      });
-
+      const mv = uciToMove(response.uci);
+      const result = game.move({ from: mv.from, to: mv.to, promotion: mv.promotion ?? "q" });
       if (!result) {
-        console.warn("Bot move inválido en UI:", uci, "fen:", game.fen());
         setEngineError("El motor devolvió una jugada inválida. Reintentá.");
         return;
       }
       sync();
     } catch (error) {
-      console.error("Error consultando al motor:", error);
-      if (error?.name === "AbortError") {
-        setEngineError("El motor tardó demasiado en responder. Reintentá.");
-      } else {
-        setEngineError("No se pudo consultar al motor. Reintentá.");
-      }
+      if (error?.name === "AbortError") setEngineError("El motor tardó demasiado en responder. Reintentá.");
+      else setEngineError("No se pudo consultar al motor. Reintentá.");
     } finally {
       keepPolling = false;
       if (pollTimer) clearTimeout(pollTimer);
       clearTimeout(timeoutId);
+      cleanupController();
       setThinking(false);
+      await refreshHintAndPrefetch();
     }
   }
 
   async function onPieceDrop(sourceSquare, targetSquare) {
-    // Bloqueo si no es tu turno o si el bot está pensando
-    if (thinking) return false;
-    if (!isPlayersTurn) return false;
+    if (thinking || !isPlayersTurn) return false;
 
-    // Promoción: default queen (para no frenar UX)
     const isPromotion =
-      sourceSquare[1] === "7" && targetSquare[1] === "8" && game.get(sourceSquare)?.type === "p" && playerColor === "w"
-        ? true
-        : sourceSquare[1] === "2" && targetSquare[1] === "1" && game.get(sourceSquare)?.type === "p" && playerColor === "b";
+      (sourceSquare[1] === "7" && targetSquare[1] === "8" && game.get(sourceSquare)?.type === "p" && playerColor === "w") ||
+      (sourceSquare[1] === "2" && targetSquare[1] === "1" && game.get(sourceSquare)?.type === "p" && playerColor === "b");
 
-    const move = game.move({
-      from: sourceSquare,
-      to: targetSquare,
-      promotion: isPromotion ? "q" : undefined,
-    });
-
-    if (move === null) return false;
+    const move = game.move({ from: sourceSquare, to: targetSquare, promotion: isPromotion ? "q" : undefined });
+    if (!move) return false;
 
     sync();
     await botPlayIfNeeded();
@@ -230,32 +300,40 @@ export default function ChessGame() {
   }
 
   function newGame(color) {
+    abortAllRequests();
+    prefetchCacheRef.current.clear();
     game.reset();
     setPlayerColor(color);
     setEngineError("");
+    setHintData({ best: null, lines: [] });
     sync();
   }
 
-  // Si el usuario elige negras, el bot (blancas) juega al inicio
   useEffect(() => {
-    // cada vez que cambia color o arranca
     (async () => {
       if (game.history().length === 0) {
         await botPlayIfNeeded();
+      } else {
+        await refreshHintAndPrefetch();
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerColor]);
 
+  useEffect(() => {
+    if (!thinking && isPlayersTurn) {
+      refreshHintAndPrefetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fen, thinking, isPlayersTurn, showHint]);
+
+  const hintArrow = hintData.best ? [[hintData.best.slice(0, 2), hintData.best.slice(2, 4), "#2e7d32"]] : [];
+
   return (
-    <div style={{ maxWidth: 520, margin: "24px auto", fontFamily: "system-ui" }}>
+    <div style={{ maxWidth: 560, margin: "24px auto", fontFamily: "system-ui" }}>
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <button onClick={() => newGame("w")} disabled={thinking}>
-          Jugar Blancas
-        </button>
-        <button onClick={() => newGame("b")} disabled={thinking}>
-          Jugar Negras
-        </button>
+        <button onClick={() => newGame("w")} disabled={thinking}>Jugar Blancas</button>
+        <button onClick={() => newGame("b")} disabled={thinking}>Jugar Negras</button>
 
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
           Nivel
@@ -266,35 +344,46 @@ export default function ChessGame() {
           </select>
         </label>
 
-        <div style={{ opacity: 0.8 }}>
-          Turno: <b>{turn === "w" ? "Blancas" : "Negras"}</b> {thinking ? "(pensando…)" : ""}
-        </div>
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={showHint} onChange={(e) => setShowHint(e.target.checked)} />
+          Show Hint
+        </label>
       </div>
 
       <div style={{ marginBottom: 12, fontSize: 13, lineHeight: 1.35, opacity: 0.92 }}>
-        <b>{levelPreset.label}</b>: respuesta estimada entre <b>{levelPreset.minMovetimeMs}</b> y <b>{levelPreset.maxMovetimeMs} ms</b>
-        {levelPreset.depth ? (
-          <>
-            {" "}(profundidad mínima <b>{levelPreset.depth}</b>)
-          </>
-        ) : null}
-        . Mayor precisión implica más tiempo de respuesta.
+        <b>{levelPreset.label}</b>: respuesta estimada entre <b>{levelPreset.minMovetimeMs}</b> y <b>{levelPreset.maxMovetimeMs} ms</b>.
       </div>
 
-      {engineError ? (
-        <div style={{ marginBottom: 12, color: "#b00020", fontSize: 13 }} role="alert">
-          {engineError}
-        </div>
-      ) : null}
+      <div style={{ marginBottom: 8, opacity: 0.8 }}>
+        Turno: <b>{turn === "w" ? "Blancas" : "Negras"}</b> {thinking ? `(pensando ${elapsedMs}ms…)` : ""}
+      </div>
+
+      {engineError ? <div style={{ marginBottom: 12, color: "#b00020", fontSize: 13 }}>{engineError}</div> : null}
 
       <Chessboard
         position={fen}
         onPieceDrop={onPieceDrop}
         boardOrientation={playerColor === "w" ? "white" : "black"}
         arePiecesDraggable={!thinking && isPlayersTurn}
+        customArrows={showHint ? hintArrow : []}
       />
 
-      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>FEN: {fen}</div>
+      {showHint && isPlayersTurn ? (
+        <div style={{ marginTop: 12, fontSize: 13 }}>
+          <b>Coach (Stockfish)</b>
+          <ul style={{ marginTop: 6, paddingLeft: 18 }}>
+            {(hintData.lines ?? []).slice(0, 3).map((line, idx) => (
+              <li key={`${line.uci}-${idx}`}>
+                {line.uci} | cp {line.scoreCp ?? "?"} | pv {(line.pvMoves ?? []).slice(0, 6).join(" ")}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>Eval: {formatEvaluation(engineStatus.score)}</div>
+      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>FEN: {fen}</div>
+      {noProgressReported ? <div style={{ marginTop: 6, color: "#8a6d3b", fontSize: 12 }}>Sin progreso reciente del motor…</div> : null}
     </div>
   );
 }
