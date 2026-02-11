@@ -42,11 +42,15 @@ function createRequestId() {
   return `req-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 }
 
-async function fetchBotMove(fen, movetimeMs, requestId) {
+async function fetchBotMove(fen, options, requestId) {
+  const { skill, movetime_ms, depth, hash_mb } = options;
   const res = await fetch("/api/move", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fen, movetime_ms: movetimeMs, request_id: requestId }),
+    headers: {
+      "Content-Type": "application/json",
+      "x-request-id": requestId,
+    },
+    body: JSON.stringify({ fen, skill, movetime_ms, depth, hash_mb }),
   });
   if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
   const data = await res.json();
@@ -149,12 +153,16 @@ export default function ChessGame() {
 
     try {
       const movetimeMs = randomInt(levelPreset.minMovetimeMs, levelPreset.maxMovetimeMs);
-      const uci = await fetchBotMove(game.fen(), {
-        skill: levelPreset.skill,
-        movetime_ms: movetimeMs,
-        depth: levelPreset.depth,
-        hash_mb: levelPreset.hashMb,
-      });
+      const uci = await fetchBotMove(
+        game.fen(),
+        {
+          skill: levelPreset.skill,
+          movetime_ms: movetimeMs,
+          depth: levelPreset.depth,
+          hash_mb: levelPreset.hashMb,
+        },
+        requestId
+      );
       if (!uci) return;
 
       const mv = uciToMove(uci);
