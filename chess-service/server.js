@@ -64,17 +64,55 @@ async function initUci() {
 
 await initUci();
 
+const SKILL_PRESETS = {
+  blitz: { movetime_ms: 200, depth: undefined, hash_mb: 64 },
+  rapid: { movetime_ms: 700, depth: undefined, hash_mb: 96 },
+  strong: { movetime_ms: 1600, depth: 10, hash_mb: 192 },
+};
+
+let currentHashMb = 64;
+
+function toPositiveInt(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return undefined;
+  const i = Math.floor(n);
+  return i > 0 ? i : undefined;
+}
+
+function resolveMoveOptions(payload = {}) {
+  const skillRaw = typeof payload.skill === "string" ? payload.skill.toLowerCase().trim() : undefined;
+  const preset = skillRaw ? SKILL_PRESETS[skillRaw] : undefined;
+
+  const movetime_ms = toPositiveInt(payload.movetime_ms) ?? preset?.movetime_ms ?? 200;
+  const depth = toPositiveInt(payload.depth) ?? preset?.depth;
+  const hash_mb = toPositiveInt(payload.hash_mb) ?? preset?.hash_mb;
+
+  return { movetime_ms, depth, hash_mb, skill: skillRaw };
+}
+
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 app.post("/api/move", async (req, res) => {
-  const { fen, movetime_ms = 200 } = req.body ?? {};
+  const { fen } = req.body ?? {};
   if (!fen) return res.status(400).json({ error: "missing fen" });
 
-  try {
-    send(`position fen ${fen}`);
-    send(`go movetime ${movetime_ms}`);
+  const opts = resolveMoveOptions(req.body ?? {});
 
-    const best = await waitFor((l) => l.startsWith("bestmove "), 5000);
+  try {
+    if (opts.hash_mb && opts.hash_mb !== currentHashMb) {
+      send(`setoption name Hash value ${opts.hash_mb}`);
+      send("isready");
+      await waitFor((l) => l === "readyok", 3000);
+      currentHashMb = opts.hash_mb;
+    }
+
+    send(`position fen ${fen}`);
+    const go = opts.depth ? `go depth ${opts.depth}` : `go movetime ${opts.movetime_ms}`;
+    send(go);
+
+    const bestTimeout = Math.max(5000, (opts.movetime_ms ?? 0) + 4000);
+    const best = await waitFor((l) => l.startsWith("bestmove "), bestTimeout);
     const uci = best.split(/\s+/)[1] ?? "0000";
 
     return res.json({ uci: uci === "0000" ? null : uci });
