@@ -976,6 +976,7 @@ static TranspositionTable TT;
 // ---------------- Search ----------------
 struct SearchState {
   chrono::steady_clock::time_point stop;
+  bool use_time_limit = true;
   uint64_t nodes = 0;
 
   // killer moves: [ply][2]
@@ -986,7 +987,7 @@ struct SearchState {
   uint32_t tt_move = 0;
 
   bool time_up() const {
-    return chrono::steady_clock::now() >= stop;
+    return use_time_limit && chrono::steady_clock::now() >= stop;
   }
 };
 
@@ -1142,7 +1143,8 @@ static int negamax(Board& b, int depth, int alpha, int beta, SearchState& st, in
 static Move search_bestmove(Board& b, int movetime_ms, int maxDepth, int& outScoreCp) {
   SearchState st;
   auto start = chrono::steady_clock::now();
-  st.stop = start + chrono::milliseconds(movetime_ms);
+  st.use_time_limit = movetime_ms > 0;
+  st.stop = st.use_time_limit ? (start + chrono::milliseconds(movetime_ms)) : chrono::steady_clock::time_point::max();
   st.nodes = 0;
   Move best{};
   uint32_t bestEnc = 0;
@@ -1283,7 +1285,7 @@ int main(int argc, char** argv) {
     }
     else if (line.rfind("go", 0) == 0) {
       GoParams gp = parse_go(line);
-      int movetime = choose_movetime_ms(board, gp);
+      int movetime = (gp.depth > 0 ? 0 : choose_movetime_ms(board, gp));
       int maxDepth = (gp.depth > 0 ? gp.depth : 20);
       int score = 0;
 
