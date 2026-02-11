@@ -1,5 +1,6 @@
 import express from "express";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
@@ -18,6 +19,23 @@ const engine = spawn(ENGINE_PATH, [], { stdio: ["pipe", "pipe", "inherit"] });
 const rl = readline.createInterface({ input: engine.stdout });
 
 let waiters = [];
+let engineQueue = Promise.resolve();
+
+const MOVE_TIMEOUT_MS = 5000;
+
+function enqueueEngineTask(fn) {
+  const task = engineQueue.then(() => fn());
+  engineQueue = task.catch(() => {
+    // Evitar que una tarea fallida rompa el encadenado futuro.
+  });
+  return task;
+}
+
+function truncateFen(fen = "", maxLen = 64) {
+  if (fen.length <= maxLen) return fen;
+  return `${fen.slice(0, maxLen)}...`;
+}
+
 rl.on("line", (line) => {
   line = line.trim();
   if (!line) return;
@@ -37,21 +55,29 @@ function send(cmd) {
   engine.stdin.write(cmd + "\n");
 }
 
-function waitFor(predicate, timeoutMs = 3000) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => {
-      // eliminar waiter si seguía
-      waiters = waiters.filter((w) => w.resolve !== resolve);
-      reject(new Error("engine timeout"));
-    }, timeoutMs);
+function cleanupWaitersForRequest(requestId) {
+  const before = waiters.length;
+  waiters = waiters.filter((w) => w.requestId !== requestId);
+  return before - waiters.length;
+}
 
-    waiters.push({
+function waitFor(predicate, timeoutMs = 3000, requestId = "system") {
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      requestId,
       predicate,
       resolve: (line) => {
         clearTimeout(t);
         resolve(line);
       },
-    });
+    };
+
+    const t = setTimeout(() => {
+      waiters = waiters.filter((w) => w !== waiter);
+      reject(new Error("engine timeout"));
+    }, timeoutMs);
+
+    waiters.push(waiter);
   });
 }
 
@@ -67,19 +93,54 @@ await initUci();
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 app.post("/api/move", async (req, res) => {
+  const requestId = req.headers["x-request-id"] || crypto.randomUUID();
   const { fen, movetime_ms = 200 } = req.body ?? {};
-  if (!fen) return res.status(400).json({ error: "missing fen" });
+  const numericMoveTime = Number(movetime_ms);
+
+  if (!fen) {
+    return res.status(400).json({ error: "missing fen", code: "MISSING_FEN" });
+  }
+
+  if (!Number.isFinite(numericMoveTime) || numericMoveTime <= 0) {
+    return res
+      .status(400)
+      .json({ error: "invalid movetime_ms", code: "INVALID_MOVETIME" });
+  }
+
+  console.log(
+    `[${requestId}] move:start fen=\"${truncateFen(fen)}\" movetime=${numericMoveTime}`
+  );
 
   try {
-    send(`position fen ${fen}`);
-    send(`go movetime ${movetime_ms}`);
+    const result = await enqueueEngineTask(async () => {
+      send(`position fen ${fen}`);
+      send(`go movetime ${numericMoveTime}`);
 
-    const best = await waitFor((l) => l.startsWith("bestmove "), 5000);
-    const uci = best.split(/\s+/)[1] ?? "0000";
+      const best = await waitFor(
+        (l) => l.startsWith("bestmove "),
+        MOVE_TIMEOUT_MS,
+        requestId
+      );
+      const uci = best.split(/\s+/)[1] ?? "0000";
 
-    return res.json({ uci: uci === "0000" ? null : uci });
+      return { uci: uci === "0000" ? null : uci };
+    });
+
+    console.log(
+      `[${requestId}] move:done bestmove=${result.uci ?? "null"} timeout=false`
+    );
+
+    return res.json(result);
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    const timeout = e?.message === "engine timeout";
+    console.warn(
+      `[${requestId}] move:error timeout=${timeout} reason=${e?.message ?? "unknown"}`
+    );
+    const status = timeout ? 504 : 500;
+    const code = timeout ? "ENGINE_TIMEOUT" : "ENGINE_ERROR";
+    return res.status(status).json({ error: e?.message ?? "internal error", code });
+  } finally {
+    cleanupWaitersForRequest(requestId);
   }
 });
 
