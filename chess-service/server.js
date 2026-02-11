@@ -409,7 +409,13 @@ app.post("/api/move", async (req, res) => {
 
 app.post("/api/hint", async (req, res) => {
   if (!stockfishReady) {
-    return res.status(503).json({ error: "stockfish unavailable", code: "STOCKFISH_UNAVAILABLE" });
+    return res.status(503).json({
+      best: null,
+      lines: [],
+      timeout: false,
+      error: "stockfish unavailable",
+      code: "STOCKFISH_UNAVAILABLE",
+    });
   }
 
   const { fen, moves_uci } = req.body ?? {};
@@ -418,7 +424,7 @@ app.post("/api/hint", async (req, res) => {
     return res.status(400).json({ error: "invalid moves_uci", code: "INVALID_MOVES_UCI" });
   }
 
-  const multipv = Math.min(5, Math.max(1, toPositiveInt(req.body?.multipv) ?? 3));
+  const multipv = Math.min(5, Math.max(1, toPositiveInt(req.body?.multipv) ?? 2));
   const movetimeMs = Math.min(2000, Math.max(50, toPositiveInt(req.body?.movetime_ms) ?? 120));
   const requestId = randomUUID();
 
@@ -443,7 +449,8 @@ app.post("/api/hint", async (req, res) => {
         const lines = [...linesByPv.values()]
           .sort((a, b) => a.multipv - b.multipv)
           .slice(0, multipv)
-          .map((entry) => ({ uci: entry.uci, scoreCp: entry.scoreCp, pvMoves: entry.pvMoves }));
+          .map((entry) => ({ uci: entry.uci, scoreCp: entry.scoreCp, pvMoves: entry.pvMoves }))
+          .filter((entry) => typeof entry.uci === "string" && entry.uci.length >= 4);
 
         const best = lines.find((l) => l.uci)?.uci ?? null;
         return { best, lines };

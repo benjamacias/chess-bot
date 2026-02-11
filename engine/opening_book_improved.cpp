@@ -1,6 +1,7 @@
 #include "opening_book.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -530,14 +531,25 @@ static int principle_bonus(const std::string& move, bool white_to_move, std::siz
   return bonus;
 }
 
+static int consistency_bonus(int weight, std::size_t prefix_ply, std::size_t current_ply) {
+  const std::size_t deviation = (current_ply >= prefix_ply) ? (current_ply - prefix_ply) : 0;
+
+  int bonus = 0;
+  if (weight >= MAIN_LINE) bonus += 40;
+  else if (weight >= GOOD_ALT) bonus += 20;
+  else bonus += 8;
+
+  // Preferir continuidad en líneas profundas y penalizar desviaciones del rival.
+  bonus += static_cast<int>(prefix_ply * 2);
+  bonus -= static_cast<int>(deviation * 12);
+
+  return bonus;
+}
+
 std::optional<std::string> opening_book_pick(
     const std::vector<std::string>& move_history,
     const std::vector<std::string>& legal_moves_uci) {
   const auto& table = opening_book_table();
-  const std::string key = make_key(move_history);
-
-  const auto it = table.find(key);
-  if (it == table.end() || it->second.empty()) return std::nullopt;
 
   const bool white_to_move = (move_history.size() % 2 == 0);
   const std::size_t ply = move_history.size();
@@ -548,12 +560,32 @@ std::optional<std::string> opening_book_pick(
   };
 
   std::vector<ScoredMove> legal_candidates;
-  legal_candidates.reserve(it->second.size());
-  for (const auto& candidate : it->second) {
-    if (candidate.weight <= 0) continue;
-    if (std::find(legal_moves_uci.begin(), legal_moves_uci.end(), candidate.uci) != legal_moves_uci.end()) {
-      const int score = candidate.weight + principle_bonus(candidate.uci, white_to_move, ply);
-      legal_candidates.push_back({candidate.uci, score});
+  legal_candidates.reserve(16);
+
+  auto score_candidates_for_prefix = [&](std::size_t prefix_len) {
+    if ((prefix_len % 2) != (ply % 2)) return;
+    const std::vector<std::string> prefix(move_history.begin(), move_history.begin() + static_cast<std::ptrdiff_t>(prefix_len));
+    const auto it = table.find(make_key(prefix));
+    if (it == table.end() || it->second.empty()) return;
+
+    for (const auto& candidate : it->second) {
+      if (candidate.weight <= 0) continue;
+      if (std::find(legal_moves_uci.begin(), legal_moves_uci.end(), candidate.uci) != legal_moves_uci.end()) {
+        const int score = candidate.weight + principle_bonus(candidate.uci, white_to_move, ply) +
+                          consistency_bonus(candidate.weight, prefix_len, ply);
+        legal_candidates.push_back({candidate.uci, score});
+      }
+    }
+  };
+
+  // 1) Intentar match exacto del historial.
+  score_candidates_for_prefix(move_history.size());
+
+  // 2) Si no hay match exacto legal, degradar por prefijo para tolerar micro-desvíos.
+  if (legal_candidates.empty()) {
+    for (std::size_t prefix_len = move_history.size(); prefix_len > 0; --prefix_len) {
+      score_candidates_for_prefix(prefix_len - 1);
+      if (!legal_candidates.empty()) break;
     }
   }
 
