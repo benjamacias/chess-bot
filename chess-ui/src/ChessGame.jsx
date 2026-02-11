@@ -9,11 +9,12 @@ function uciToMove(uci) {
   return { from, to, promotion };
 }
 
-async function fetchBotMove(fen, movetimeMs) {
+async function fetchBotMove(fen, movetimeMs, signal) {
   const res = await fetch("/api/move", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ fen, movetime_ms: movetimeMs }),
+    signal,
   });
   if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
   const data = await res.json();
@@ -26,6 +27,7 @@ export default function ChessGame() {
   const [playerColor, setPlayerColor] = useState("w"); // "w" o "b"
   const [thinking, setThinking] = useState(false);
   const [movetimeMs, setMovetimeMs] = useState(200);
+  const [engineError, setEngineError] = useState("");
 
   const turn = fen.split(" ")[1]; // "w" o "b"
   const isPlayersTurn = turn === playerColor;
@@ -39,9 +41,14 @@ export default function ChessGame() {
     const t = game.turn(); // "w" o "b"
     if (t === playerColor) return;
 
+    const timeoutMs = Math.max(movetimeMs + 1500, 2500);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     setThinking(true);
+    setEngineError("");
     try {
-      const uci = await fetchBotMove(game.fen(), movetimeMs);
+      const uci = await fetchBotMove(game.fen(), movetimeMs, controller.signal);
       if (!uci) return;
 
       const mv = uciToMove(uci);
@@ -54,9 +61,15 @@ export default function ChessGame() {
 
       if (!result) {
         console.warn("Bot move inválido en UI:", uci, "fen:", game.fen());
+        setEngineError("El motor no respondió, reintentá");
+        return;
       }
       sync();
+    } catch (error) {
+      console.error("Error consultando al motor:", error);
+      setEngineError("El motor no respondió, reintentá");
     } finally {
+      clearTimeout(timeoutId);
       setThinking(false);
     }
   }
@@ -88,6 +101,7 @@ export default function ChessGame() {
   function newGame(color) {
     game.reset();
     setPlayerColor(color);
+    setEngineError("");
     sync();
   }
 
@@ -138,10 +152,31 @@ export default function ChessGame() {
         arePiecesDraggable={!thinking && isPlayersTurn}
       />
 
+      {engineError && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: 12,
+            borderRadius: 8,
+            background: "#ffe8e8",
+            border: "1px solid #ffb3b3",
+          }}
+        >
+          <div style={{ marginBottom: 8, color: "#8a1f11", fontWeight: 600 }}>{engineError}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={botPlayIfNeeded} disabled={thinking || game.isGameOver()}>
+              Reintentar jugada del bot
+            </button>
+            <button onClick={() => newGame(playerColor)} disabled={thinking}>
+              Nueva partida
+            </button>
+          </div>
+        </div>
+      )}
+
       <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
         FEN: {fen}
       </div>
     </div>
   );
 }
-
