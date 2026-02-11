@@ -28,6 +28,7 @@ const LEVEL_PRESETS = {
     hashMb: 192,
   },
 };
+const NO_PROGRESS_TIMEOUT_MS = 3000;
 
 function uciToMove(uci) {
   const from = uci.slice(0, 2);
@@ -36,19 +37,38 @@ function uciToMove(uci) {
   return { from, to, promotion };
 }
 
-function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+function createRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `req-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 }
 
-async function fetchBotMove(fen, options) {
+async function fetchBotMove(fen, movetimeMs, requestId) {
   const res = await fetch("/api/move", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fen, ...options }),
+    body: JSON.stringify({ fen, movetime_ms: movetimeMs, request_id: requestId }),
   });
   if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
   const data = await res.json();
   return data.uci; // string o null
+}
+
+async function fetchMoveStatus(requestId) {
+  const res = await fetch(`/api/move/status/${requestId}`);
+  if (!res.ok) throw new Error(`api/move/status failed: ${res.status}`);
+  return res.json();
+}
+
+function formatEvaluation(score) {
+  if (!score) return "—";
+  if (score.type === "cp") {
+    const pawns = score.value / 100;
+    return `${pawns >= 0 ? "+" : ""}${pawns.toFixed(2)}`;
+  }
+  if (score.type === "mate") {
+    return `Mate ${score.value >= 0 ? "+" : ""}${score.value}`;
+  }
+  return "—";
 }
 
 export default function ChessGame() {
@@ -57,10 +77,33 @@ export default function ChessGame() {
   const [playerColor, setPlayerColor] = useState("w"); // "w" o "b"
   const [thinking, setThinking] = useState(false);
   const [level, setLevel] = useState("rapido");
+  const [movetimeMs, setMovetimeMs] = useState(200);
+  const [thinkingStartedAt, setThinkingStartedAt] = useState(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [engineStatus, setEngineStatus] = useState({ depth: null, score: null, pv: "", lastInfoAt: null });
 
   const turn = fen.split(" ")[1]; // "w" o "b"
   const isPlayersTurn = turn === playerColor;
   const levelPreset = LEVEL_PRESETS[level] ?? LEVEL_PRESETS.rapido;
+
+  const noProgressReported =
+    thinking &&
+    thinkingStartedAt &&
+    Date.now() - (engineStatus.lastInfoAt ?? thinkingStartedAt) >= NO_PROGRESS_TIMEOUT_MS;
+
+  useEffect(() => {
+    if (!thinking || !thinkingStartedAt) {
+      setElapsedMs(0);
+      return;
+    }
+
+    setElapsedMs(Date.now() - thinkingStartedAt);
+    const timer = setInterval(() => {
+      setElapsedMs(Date.now() - thinkingStartedAt);
+    }, 250);
+
+    return () => clearInterval(timer);
+  }, [thinking, thinkingStartedAt]);
 
   function sync() {
     setFen(game.fen());
@@ -71,7 +114,39 @@ export default function ChessGame() {
     const t = game.turn(); // "w" o "b"
     if (t === playerColor) return;
 
+    const timeoutMs = Math.max(movetimeMs + 1500, 2500);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     setThinking(true);
+    setThinkingStartedAt(Date.now());
+    setEngineStatus({ depth: null, score: null, pv: "", lastInfoAt: null });
+
+    const requestId = createRequestId();
+    let pollTimer = null;
+    let keepPolling = true;
+
+    const pollStatus = async () => {
+      if (!keepPolling) return;
+      try {
+        const status = await fetchMoveStatus(requestId);
+        setEngineStatus({
+          depth: status.depth,
+          score: status.score,
+          pv: status.pv,
+          lastInfoAt: status.lastInfoAt,
+        });
+      } catch {
+        // ignore polling errors to avoid romper flujo del juego
+      } finally {
+        if (keepPolling) {
+          pollTimer = setTimeout(pollStatus, 250);
+        }
+      }
+    };
+
+    pollTimer = setTimeout(pollStatus, 100);
+
     try {
       const movetimeMs = randomInt(levelPreset.minMovetimeMs, levelPreset.maxMovetimeMs);
       const uci = await fetchBotMove(game.fen(), {
@@ -92,9 +167,16 @@ export default function ChessGame() {
 
       if (!result) {
         console.warn("Bot move inválido en UI:", uci, "fen:", game.fen());
+        setEngineError("El motor no respondió, reintentá");
+        return;
       }
       sync();
+    } catch (error) {
+      console.error("Error consultando al motor:", error);
+      setEngineError("El motor no respondió, reintentá");
     } finally {
+      keepPolling = false;
+      if (pollTimer) clearTimeout(pollTimer);
       setThinking(false);
     }
   }
@@ -126,6 +208,7 @@ export default function ChessGame() {
   function newGame(color) {
     game.reset();
     setPlayerColor(color);
+    setEngineError("");
     sync();
   }
 
