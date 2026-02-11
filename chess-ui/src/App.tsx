@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 
@@ -20,9 +20,15 @@ function uciToMove(uci: string) {
 }
 
 async function fetchBotMove(fen: string, movetimeMs: number) {
+  const requestId =
+    globalThis.crypto?.randomUUID?.() ?? `req-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+
   const res = await fetch("/api/move", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-request-id": requestId,
+    },
     body: JSON.stringify({ fen, movetime_ms: movetimeMs }),
   });
 
@@ -30,9 +36,21 @@ async function fetchBotMove(fen: string, movetimeMs: number) {
     throw new Error(`/api/move failed: ${res.status}`);
   }
 
-  const data = (await res.json()) as { uci: string | null };
-  return data.uci;
+  const data = (await res.json()) as { uci: string | null; terminal?: boolean; reason?: string | null };
+  return data;
 }
+
+function reasonToMessage(reason?: string | null) {
+  if (reason === "CHECKMATE") return "Sin jugadas legales: jaque mate.";
+  if (reason === "NO_LEGAL_MOVES") return "Sin jugadas legales: posición terminal (p. ej. ahogado).";
+  return "No hay jugadas legales para el motor en esta posición.";
+}
+
+type PieceDrop = {
+  sourceSquare: string;
+  targetSquare: string | null;
+  piece: { pieceType: string };
+};
 
 export default function App() {
   const gameRef = useRef(new Chess());
@@ -43,20 +61,22 @@ export default function App() {
   const [boardView, setBoardView] = useState<Color>("white");
   const [fen, setFen] = useState(gameRef.current.fen());
   const [busy, setBusy] = useState(false);
+  const [engineMessage, setEngineMessage] = useState("");
 
   function resetGame(nextPlayerColor = playerColor) {
     gameRef.current = new Chess();
     setPlayerColor(nextPlayerColor);
     setFen(gameRef.current.fen());
     setBusy(false);
+    setEngineMessage("");
     inFlightRef.current = false;
   }
 
-  function isPlayersTurn() {
+  const isPlayersTurn = useCallback(() => {
     return gameRef.current.turn() === toTurnChar(playerColor);
-  }
+  }, [playerColor]);
 
-  async function makeBotMoveExplicit(botColor: Color) {
+  const makeBotMoveExplicit = useCallback(async (botColor: Color) => {
     if (inFlightRef.current) return;
     if (gameRef.current.turn() !== toTurnChar(botColor)) return;
 
@@ -65,22 +85,29 @@ export default function App() {
 
     try {
       const currentFen = gameRef.current.fen();
-      const uci = await fetchBotMove(currentFen, movetimeMs);
-      if (!uci) return;
-
-      const move = gameRef.current.move(uciToMove(uci));
-      if (!move) {
-        throw new Error(`Invalid UCI from backend: ${uci}`);
+      const result = await fetchBotMove(currentFen, movetimeMs);
+      if (!result.uci) {
+        if (result.terminal) {
+          setEngineMessage(reasonToMessage(result.reason));
+        }
+        return;
       }
 
+      const move = gameRef.current.move(uciToMove(result.uci));
+      if (!move) {
+        throw new Error(`Invalid UCI from backend: ${result.uci}`);
+      }
+
+      setEngineMessage("");
       setFen(gameRef.current.fen());
     } catch (error) {
       console.error("Bot move error", error);
+      setEngineMessage("No se pudo obtener jugada del motor. Reintentá.");
     } finally {
       inFlightRef.current = false;
       setBusy(false);
     }
-  }
+  }, [movetimeMs]);
 
   const chessboardOptions = useMemo(() => {
     return {
@@ -97,7 +124,7 @@ export default function App() {
         const myPrefix = playerColor === "white" ? "w" : "b";
         return piece.pieceType.startsWith(myPrefix);
       },
-      onPieceDrop: ({ sourceSquare, targetSquare, piece }: any) => {
+      onPieceDrop: ({ sourceSquare, targetSquare, piece }: PieceDrop) => {
         if (busy) return false;
         if (!targetSquare) return false;
         if (!isPlayersTurn()) return false;
@@ -120,7 +147,7 @@ export default function App() {
         return true;
       },
     };
-  }, [fen, boardView, busy, playerColor]);
+  }, [fen, boardView, busy, playerColor, isPlayersTurn, makeBotMoveExplicit]);
 
   return (
     <div style={{ maxWidth: 520, margin: "24px auto", padding: 16 }}>
@@ -170,6 +197,12 @@ export default function App() {
       </div>
 
       <Chessboard options={chessboardOptions} />
+
+      {engineMessage ? (
+        <div style={{ marginTop: 12, color: "#b00020", fontSize: 13 }} role="alert">
+          {engineMessage}
+        </div>
+      ) : null}
     </div>
   );
 }
