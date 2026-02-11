@@ -1,6 +1,5 @@
 import express from "express";
 import { spawn } from "node:child_process";
-import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
@@ -15,13 +14,14 @@ const __dirname = path.dirname(__filename);
 const ENGINE_PATH = path.resolve(__dirname, "../engine/build/bm_engine");
 
 const engine = spawn(ENGINE_PATH, [], { stdio: ["pipe", "pipe", "inherit"] });
-
-// Leer stdout por líneas
 const rl = readline.createInterface({ input: engine.stdout });
 
 let waiters = [];
 let activeRequestId = null;
 const requestStates = new Map();
+let engineQueue = Promise.resolve();
+
+const MOVE_TIMEOUT_MS = 5000;
 
 function parseInfoLine(line) {
   if (!line.startsWith("info ")) return null;
@@ -50,9 +50,7 @@ function parseInfoLine(line) {
     pv,
     raw: line,
   };
-let engineQueue = Promise.resolve();
-
-const MOVE_TIMEOUT_MS = 5000;
+}
 
 function enqueueEngineTask(fn) {
   const task = engineQueue.then(() => fn());
@@ -67,8 +65,8 @@ function truncateFen(fen = "", maxLen = 64) {
   return `${fen.slice(0, maxLen)}...`;
 }
 
-rl.on("line", (line) => {
-  line = line.trim();
+rl.on("line", (rawLine) => {
+  const line = rawLine.trim();
   if (!line) return;
 
   if (activeRequestId) {
@@ -82,6 +80,7 @@ rl.on("line", (line) => {
         state.bestmove = line.split(/\s+/)[1] ?? "0000";
         state.active = false;
         state.finishedAt = Date.now();
+        activeRequestId = null;
       }
     }
   }
@@ -98,7 +97,7 @@ rl.on("line", (line) => {
 });
 
 function send(cmd) {
-  engine.stdin.write(cmd + "\n");
+  engine.stdin.write(`${cmd}\n`);
 }
 
 function cleanupWaitersForRequest(requestId) {
@@ -197,83 +196,73 @@ app.get("/api/move/status/:id", (req, res) => {
 });
 
 app.post("/api/move", async (req, res) => {
-  const requestId = req.headers["x-request-id"] || crypto.randomUUID();
-  const { fen, movetime_ms = 200 } = req.body ?? {};
-  const numericMoveTime = Number(movetime_ms);
+  const headerRequestId = req.headers["x-request-id"];
+  const requestId =
+    typeof headerRequestId === "string" && headerRequestId.trim() ? headerRequestId : randomUUID();
 
+  const { fen } = req.body ?? {};
   if (!fen) {
     return res.status(400).json({ error: "missing fen", code: "MISSING_FEN" });
   }
 
+  const opts = resolveMoveOptions(req.body ?? {});
+  const numericMoveTime = Number(opts.movetime_ms);
   if (!Number.isFinite(numericMoveTime) || numericMoveTime <= 0) {
-    return res
-      .status(400)
-      .json({ error: "invalid movetime_ms", code: "INVALID_MOVETIME" });
+    return res.status(400).json({ error: "invalid movetime_ms", code: "INVALID_MOVETIME" });
   }
 
+  const state = {
+    id: requestId,
+    active: true,
+    startedAt: Date.now(),
+    finishedAt: null,
+    lastInfoAt: null,
+    lastInfo: null,
+    bestmove: null,
+    error: null,
+  };
+  requestStates.set(requestId, state);
+  cleanupOldStates();
+
   console.log(
-    `[${requestId}] move:start fen=\"${truncateFen(fen)}\" movetime=${numericMoveTime}`
+    `[${requestId}] move:start fen="${truncateFen(fen)}" movetime=${numericMoveTime} depth=${opts.depth ?? "-"}`
   );
 
-  const requestId = typeof request_id === "string" && request_id.trim() ? request_id : randomUUID();
-
-  const opts = resolveMoveOptions(req.body ?? {});
-
   try {
-    if (opts.hash_mb && opts.hash_mb !== currentHashMb) {
-      send(`setoption name Hash value ${opts.hash_mb}`);
-      send("isready");
-      await waitFor((l) => l === "readyok", 3000);
-      currentHashMb = opts.hash_mb;
-    }
-
-    send(`position fen ${fen}`);
-    const go = opts.depth ? `go depth ${opts.depth}` : `go movetime ${opts.movetime_ms}`;
-    send(go);
-
-    const bestTimeout = Math.max(5000, (opts.movetime_ms ?? 0) + 4000);
-    const best = await waitFor((l) => l.startsWith("bestmove "), bestTimeout);
-    const uci = best.split(/\s+/)[1] ?? "0000";
-    cleanupOldStates();
-    const state = {
-      id: requestId,
-      active: true,
-      startedAt: Date.now(),
-      finishedAt: null,
-      lastInfoAt: null,
-      lastInfo: null,
-      bestmove: null,
-      error: null,
-    };
-    requestStates.set(requestId, state);
-    activeRequestId = requestId;
-
-    send(`position fen ${fen}`);
-    send(`go movetime ${movetime_ms}`);
     const result = await enqueueEngineTask(async () => {
-      send(`position fen ${fen}`);
-      send(`go movetime ${numericMoveTime}`);
+      activeRequestId = requestId;
 
-      const best = await waitFor(
-        (l) => l.startsWith("bestmove "),
-        MOVE_TIMEOUT_MS,
-        requestId
-      );
+      if (opts.hash_mb && opts.hash_mb !== currentHashMb) {
+        send(`setoption name Hash value ${opts.hash_mb}`);
+        send("isready");
+        await waitFor((l) => l === "readyok", 3000, requestId);
+        currentHashMb = opts.hash_mb;
+      }
+
+      send(`position fen ${fen}`);
+      const go = opts.depth ? `go depth ${opts.depth}` : `go movetime ${numericMoveTime}`;
+      send(go);
+
+      const bestTimeout = Math.max(MOVE_TIMEOUT_MS, numericMoveTime + 4000);
+      const best = await waitFor((l) => l.startsWith("bestmove "), bestTimeout, requestId);
       const uci = best.split(/\s+/)[1] ?? "0000";
 
       return { uci: uci === "0000" ? null : uci };
     });
 
-    console.log(
-      `[${requestId}] move:done bestmove=${result.uci ?? "null"} timeout=false`
-    );
-
+    console.log(`[${requestId}] move:done bestmove=${result.uci ?? "null"} timeout=false`);
     return res.json(result);
   } catch (e) {
     const timeout = e?.message === "engine timeout";
+    state.active = false;
+    state.finishedAt = Date.now();
+    state.error = timeout ? "ENGINE_TIMEOUT" : "ENGINE_ERROR";
+    activeRequestId = null;
+
     console.warn(
       `[${requestId}] move:error timeout=${timeout} reason=${e?.message ?? "unknown"}`
     );
+
     const status = timeout ? 504 : 500;
     const code = timeout ? "ENGINE_TIMEOUT" : "ENGINE_ERROR";
     return res.status(status).json({ error: e?.message ?? "internal error", code });
