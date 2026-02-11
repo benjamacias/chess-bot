@@ -7,6 +7,7 @@
 #include <vector>
 #include <iostream>
 #include <sstream>
+#include <random>
 
 namespace {
 
@@ -596,7 +597,32 @@ std::optional<std::string> opening_book_pick(
     return a.uci < b.uci;
   });
 
-  return legal_candidates.front().uci;
+  const int best_score = legal_candidates.front().score;
+  std::vector<ScoredMove> shortlist;
+  shortlist.reserve(legal_candidates.size());
+
+  for (const auto& entry : legal_candidates) {
+    if (entry.score < best_score - 25) break;
+    shortlist.push_back(entry);
+  }
+
+  if (shortlist.size() == 1) return shortlist.front().uci;
+
+  int total_weight = 0;
+  for (const auto& entry : shortlist) {
+    total_weight += std::max(1, entry.score - (best_score - 30));
+  }
+
+  static thread_local std::mt19937 rng(std::random_device{}());
+  std::uniform_int_distribution<int> dist(1, std::max(1, total_weight));
+  int pick = dist(rng);
+
+  for (const auto& entry : shortlist) {
+    pick -= std::max(1, entry.score - (best_score - 30));
+    if (pick <= 0) return entry.uci;
+  }
+
+  return shortlist.front().uci;
 }
 
 // ========================================
