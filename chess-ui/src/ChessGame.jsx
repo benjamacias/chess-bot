@@ -133,8 +133,12 @@ export default function ChessGame() {
   }
 
   async function refreshHintAndPrefetch() {
-    if (!showHint || !isPlayersTurn || game.isGameOver()) {
+    if (!showHint || game.isGameOver()) {
       setHintData({ best: null, lines: [] });
+      return;
+    }
+
+    if (!isPlayersTurn) {
       return;
     }
 
@@ -340,18 +344,26 @@ export default function ChessGame() {
   }, [playerColor]);
 
   useEffect(() => {
-    if (!thinking && isPlayersTurn) {
+    if (!thinking && isPlayersTurn && showHint && !game.isGameOver()) {
       refreshHintAndPrefetch();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fen, thinking, isPlayersTurn, showHint, hintLines]);
 
-  const hintArrows = showHint && isPlayersTurn
+  const hintArrows = showHint
     ? (hintData.lines ?? [])
         .slice(0, hintLines)
         .filter((line) => typeof line?.uci === "string" && line.uci.length >= 4)
         .map((line, idx) => [line.uci.slice(0, 2), line.uci.slice(2, 4), idx === 0 ? "#2e7d32" : "#1e88e5"])
     : [];
+
+  const hintStatus = !showHint
+    ? "off"
+    : game.isGameOver()
+      ? "game-over"
+      : isPlayersTurn
+        ? "active-turn"
+        : "waiting-turn";
 
   return (
     <div style={{ maxWidth: 560, margin: "24px auto", fontFamily: "system-ui" }}>
@@ -400,9 +412,26 @@ export default function ChessGame() {
         customArrows={hintArrows}
       />
 
-      {showHint && isPlayersTurn ? (
+      {showHint ? (
         <div style={{ marginTop: 12, fontSize: 13 }}>
-          <b>Coach (Stockfish)</b>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <b>Coach (Stockfish)</b>
+            {hintStatus === "waiting-turn" ? (
+              <span
+                style={{
+                  fontSize: 11,
+                  padding: "2px 6px",
+                  borderRadius: 999,
+                  background: "#eceff1",
+                  color: "#455a64",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.2,
+                }}
+              >
+                Hint vigente · esperando turno
+              </span>
+            ) : null}
+          </div>
           {(hintData.lines ?? []).length === 0 ? (
             <div style={{ marginTop: 6, opacity: 0.8 }}>Sin hint disponible.</div>
           ) : (
