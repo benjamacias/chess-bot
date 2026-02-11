@@ -1,7 +1,6 @@
 #include "opening_book.h"
 
 #include <algorithm>
-#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -502,6 +501,35 @@ static const BookTable& opening_book_table() {
 
 }  // namespace
 
+static bool is_early_queen_move(const std::string& uci, std::size_t ply) {
+  if (ply > 6 || uci.size() < 2) return false;
+  return uci.rfind("d1", 0) == 0 || uci.rfind("d8", 0) == 0;
+}
+
+static int principle_bonus(const std::string& move, bool white_to_move, std::size_t ply) {
+  int bonus = 0;
+
+  if (white_to_move) {
+    if (move == "e2e4") bonus += 40;
+    else if (move == "d2d4") bonus += 36;
+    else if (move == "g1f3") bonus += 28;
+    else if (move == "b1c3") bonus += 24;
+    else if (move == "f1c4") bonus += 20;
+    else if (move == "f1b5") bonus += 18;
+    else if (move == "c1g5") bonus += 14;
+  } else {
+    if (move == "e7e6") bonus += 34;
+    else if (move == "c7c6") bonus += 33;
+    else if (move == "d7d5") bonus += 32;
+    else if (move == "g8f6") bonus += 24;
+    else if (move == "c7c5") bonus -= 10;
+  }
+
+  if (is_early_queen_move(move, ply)) bonus -= 35;
+
+  return bonus;
+}
+
 std::optional<std::string> opening_book_pick(
     const std::vector<std::string>& move_history,
     const std::vector<std::string>& legal_moves_uci) {
@@ -511,28 +539,30 @@ std::optional<std::string> opening_book_pick(
   const auto it = table.find(key);
   if (it == table.end() || it->second.empty()) return std::nullopt;
 
-  std::vector<BookCandidate> legal_candidates;
+  const bool white_to_move = (move_history.size() % 2 == 0);
+  const std::size_t ply = move_history.size();
+
+  struct ScoredMove {
+    std::string uci;
+    int score;
+  };
+
+  std::vector<ScoredMove> legal_candidates;
   legal_candidates.reserve(it->second.size());
   for (const auto& candidate : it->second) {
     if (candidate.weight <= 0) continue;
     if (std::find(legal_moves_uci.begin(), legal_moves_uci.end(), candidate.uci) != legal_moves_uci.end()) {
-      legal_candidates.push_back(candidate);
+      const int score = candidate.weight + principle_bonus(candidate.uci, white_to_move, ply);
+      legal_candidates.push_back({candidate.uci, score});
     }
   }
 
   if (legal_candidates.empty()) return std::nullopt;
 
-  int total_weight = 0;
-  for (const auto& c : legal_candidates) total_weight += c.weight;
-
-  static thread_local std::mt19937 rng(std::random_device{}());
-  std::uniform_int_distribution<int> dist(1, total_weight);
-  int roll = dist(rng);
-
-  for (const auto& c : legal_candidates) {
-    roll -= c.weight;
-    if (roll <= 0) return c.uci;
-  }
+  std::sort(legal_candidates.begin(), legal_candidates.end(), [](const ScoredMove& a, const ScoredMove& b) {
+    if (a.score != b.score) return a.score > b.score;
+    return a.uci < b.uci;
+  });
 
   return legal_candidates.front().uci;
 }

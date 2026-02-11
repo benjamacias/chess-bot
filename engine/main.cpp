@@ -785,6 +785,20 @@ static bool has_critical_tactics(Board& b, const vector<Move>& legal) {
   return false;
 }
 
+static bool is_early_queen_move_uci(const string& uci, size_t ply) {
+  if (ply > 6 || uci.size() < 2) return false;
+  return uci.rfind("d1", 0) == 0 || uci.rfind("d8", 0) == 0;
+}
+
+static bool move_keeps_king_safe(Board& b, const Move& m) {
+  Undo u;
+  b.make_move(m, u);
+  const int us = b.side ^ 1;
+  const bool inCheck = b.in_check(static_cast<Color>(us));
+  b.unmake_move(m, u);
+  return !inCheck;
+}
+
 struct GoParams {
   int depth = 0;          // 0 => iterative until time
   int movetime_ms = 0;    // 0 => derive from clocks
@@ -1308,10 +1322,28 @@ int main(int argc, char** argv) {
       legal_uci.reserve(legal.size());
       for (const auto& m : legal) legal_uci.push_back(move_to_uci(m));
 
+      constexpr size_t BOOK_MAX_PLIES = 12;
       auto book_move = opening_book_pick(move_history, legal_uci);
-      if (book_move && !has_critical_tactics(board, legal)) {
-        cout << "bestmove " << *book_move << "\n";
-        continue;
+      if (book_move && move_history.size() <= BOOK_MAX_PLIES && !has_critical_tactics(board, legal)) {
+        auto itLegal = find(legal_uci.begin(), legal_uci.end(), *book_move);
+        bool valid_book_move = (itLegal != legal_uci.end());
+
+        if (valid_book_move && is_early_queen_move_uci(*book_move, move_history.size())) {
+          valid_book_move = false;
+        }
+
+        if (valid_book_move) {
+          size_t idx = static_cast<size_t>(distance(legal_uci.begin(), itLegal));
+          if (idx < legal.size() && !move_keeps_king_safe(board, legal[idx])) {
+            valid_book_move = false;
+          }
+        }
+
+        if (valid_book_move) {
+          cout << "info string bookhit move=" << *book_move << "\n";
+          cout << "bestmove " << *book_move << "\n";
+          continue;
+        }
       }
 
       Move bm = search_bestmove(board, movetime, maxDepth, score);
