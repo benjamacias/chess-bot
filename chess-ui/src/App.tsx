@@ -19,7 +19,11 @@ function uciToMove(uci: string) {
   return { from, to, promotion };
 }
 
-async function fetchBotMove(fen: string, movetimeMs: number) {
+function buildMovesUci(game: Chess) {
+  return game.history({ verbose: true }).map((move) => `${move.from}${move.to}${move.promotion ?? ""}`);
+}
+
+async function fetchBotMove(fen: string, movesUci: string[], movetimeMs: number) {
   const requestId =
     globalThis.crypto?.randomUUID?.() ?? `req-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 
@@ -29,7 +33,7 @@ async function fetchBotMove(fen: string, movetimeMs: number) {
       "Content-Type": "application/json",
       "x-request-id": requestId,
     },
-    body: JSON.stringify({ fen, movetime_ms: movetimeMs }),
+    body: JSON.stringify({ fen, moves_uci: movesUci, movetime_ms: movetimeMs }),
   });
 
   if (!res.ok) {
@@ -85,7 +89,8 @@ export default function App() {
 
     try {
       const currentFen = gameRef.current.fen();
-      const result = await fetchBotMove(currentFen, movetimeMs);
+      const movesUci = buildMovesUci(gameRef.current);
+      const result = await fetchBotMove(currentFen, movesUci, movetimeMs);
       if (!result.uci) {
         if (result.terminal) {
           setEngineMessage(reasonToMessage(result.reason));
