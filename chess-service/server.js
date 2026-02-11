@@ -1,5 +1,6 @@
 import express from "express";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
@@ -49,6 +50,21 @@ function parseInfoLine(line) {
     pv,
     raw: line,
   };
+let engineQueue = Promise.resolve();
+
+const MOVE_TIMEOUT_MS = 5000;
+
+function enqueueEngineTask(fn) {
+  const task = engineQueue.then(() => fn());
+  engineQueue = task.catch(() => {
+    // Evitar que una tarea fallida rompa el encadenado futuro.
+  });
+  return task;
+}
+
+function truncateFen(fen = "", maxLen = 64) {
+  if (fen.length <= maxLen) return fen;
+  return `${fen.slice(0, maxLen)}...`;
 }
 
 rl.on("line", (line) => {
@@ -85,21 +101,29 @@ function send(cmd) {
   engine.stdin.write(cmd + "\n");
 }
 
-function waitFor(predicate, timeoutMs = 3000) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => {
-      // eliminar waiter si seguía
-      waiters = waiters.filter((w) => w.resolve !== resolve);
-      reject(new Error("engine timeout"));
-    }, timeoutMs);
+function cleanupWaitersForRequest(requestId) {
+  const before = waiters.length;
+  waiters = waiters.filter((w) => w.requestId !== requestId);
+  return before - waiters.length;
+}
 
-    waiters.push({
+function waitFor(predicate, timeoutMs = 3000, requestId = "system") {
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      requestId,
       predicate,
       resolve: (line) => {
         clearTimeout(t);
         resolve(line);
       },
-    });
+    };
+
+    const t = setTimeout(() => {
+      waiters = waiters.filter((w) => w !== waiter);
+      reject(new Error("engine timeout"));
+    }, timeoutMs);
+
+    waiters.push(waiter);
   });
 }
 
@@ -146,8 +170,23 @@ app.get("/api/move/status/:id", (req, res) => {
 });
 
 app.post("/api/move", async (req, res) => {
-  const { fen, movetime_ms = 200, request_id } = req.body ?? {};
-  if (!fen) return res.status(400).json({ error: "missing fen" });
+  const requestId = req.headers["x-request-id"] || crypto.randomUUID();
+  const { fen, movetime_ms = 200 } = req.body ?? {};
+  const numericMoveTime = Number(movetime_ms);
+
+  if (!fen) {
+    return res.status(400).json({ error: "missing fen", code: "MISSING_FEN" });
+  }
+
+  if (!Number.isFinite(numericMoveTime) || numericMoveTime <= 0) {
+    return res
+      .status(400)
+      .json({ error: "invalid movetime_ms", code: "INVALID_MOVETIME" });
+  }
+
+  console.log(
+    `[${requestId}] move:start fen=\"${truncateFen(fen)}\" movetime=${numericMoveTime}`
+  );
 
   const requestId = typeof request_id === "string" && request_id.trim() ? request_id : randomUUID();
 
@@ -168,25 +207,35 @@ app.post("/api/move", async (req, res) => {
 
     send(`position fen ${fen}`);
     send(`go movetime ${movetime_ms}`);
+    const result = await enqueueEngineTask(async () => {
+      send(`position fen ${fen}`);
+      send(`go movetime ${numericMoveTime}`);
 
-    const best = await waitFor((l) => l.startsWith("bestmove "), 5000);
-    const uci = best.split(/\s+/)[1] ?? "0000";
+      const best = await waitFor(
+        (l) => l.startsWith("bestmove "),
+        MOVE_TIMEOUT_MS,
+        requestId
+      );
+      const uci = best.split(/\s+/)[1] ?? "0000";
 
-    state.active = false;
-    state.bestmove = uci;
-    state.finishedAt = Date.now();
-    if (activeRequestId === requestId) activeRequestId = null;
+      return { uci: uci === "0000" ? null : uci };
+    });
 
-    return res.json({ request_id: requestId, uci: uci === "0000" ? null : uci });
+    console.log(
+      `[${requestId}] move:done bestmove=${result.uci ?? "null"} timeout=false`
+    );
+
+    return res.json(result);
   } catch (e) {
-    const state = requestStates.get(requestId);
-    if (state) {
-      state.active = false;
-      state.error = e.message;
-      state.finishedAt = Date.now();
-    }
-    if (activeRequestId === requestId) activeRequestId = null;
-    return res.status(500).json({ request_id: requestId, error: e.message });
+    const timeout = e?.message === "engine timeout";
+    console.warn(
+      `[${requestId}] move:error timeout=${timeout} reason=${e?.message ?? "unknown"}`
+    );
+    const status = timeout ? 504 : 500;
+    const code = timeout ? "ENGINE_TIMEOUT" : "ENGINE_ERROR";
+    return res.status(status).json({ error: e?.message ?? "internal error", code });
+  } finally {
+    cleanupWaitersForRequest(requestId);
   }
 });
 

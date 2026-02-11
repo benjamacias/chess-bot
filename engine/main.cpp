@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstdint>
 
+#include "opening_book.h"
+
 using namespace std;
 
 enum Color : int { WHITE = 0, BLACK = 1 };
@@ -720,155 +722,6 @@ static void perft_divide(Board& b, int depth) {
 }
 
 
-static bool find_move_ft(const vector<Move>& legal, int from, int to, int promo, Move& out) {
-  for (const auto& m : legal) {
-    if (m.from == from && m.to == to && m.promo == promo) { out = m; return true; }
-  }
-  return false;
-}
-
-static bool opening_policy(Board& b, Move& out) {
-  int ply = (b.fullmove - 1) * 2 + (b.side == BLACK ? 1 : 0);
-  if (ply > 12) return false;
-
-  // Si estás en jaque, que el search resuelva (evita “book suicida”)
-  if (b.in_check(b.side)) return false;
-
-  vector<Move> legal;
-  b.gen_legal(legal);
-
-  // Si hay capturas disponibles, salí del book y que calcule (evita absurdos)
-  for (const auto& m : legal) {
-    if (m.flags & Move::CAPTURE) return false;
-  }
-
-  auto pick = [&](initializer_list<tuple<const char*, const char*, int>> list) -> bool {
-    for (auto &t : list) {
-      int from = str_to_sq(string(get<0>(t)));
-      int to   = str_to_sq(string(get<1>(t)));
-      int promo = get<2>(t);
-      if (from >= 0 && to >= 0 && find_move_ft(legal, from, to, promo, out)) return true;
-    }
-    return false;
-  };
-
-  auto has = [&](const char* sq, int8_t p) -> bool {
-    int s = str_to_sq(string(sq));
-    return (s >= 0 && b.sq[s] == p);
-  };
-
-  // Flags de estructura
-  bool w_e4 = has("e4", (int8_t)PAWN);
-  bool w_d4 = has("d4", (int8_t)PAWN);
-  bool w_c4 = has("c4", (int8_t)PAWN);
-  bool w_e5 = has("e5", (int8_t)PAWN);
-
-  bool b_e5 = has("e5", (int8_t)(-PAWN));
-  bool b_c6 = has("c6", (int8_t)(-PAWN));
-  bool b_d5 = has("d5", (int8_t)(-PAWN));
-  bool b_e6 = has("e6", (int8_t)(-PAWN));
-
-  // Debug opcional (te deja ver cuándo está usando book)
-  // cout << "info string book\n";
-
-  // =========================
-  // BLANCAS (agresivo)
-  // =========================
-  if (b.side == WHITE) {
-    if (ply == 0) return pick({ {"e2","e4",EMPTY} });
-
-    // vs Caro-Kann (...c6): Advance (d4, e5) + desarrollo
-    if (w_e4 && b_c6) {
-      if (!w_d4) return pick({ {"d2","d4",EMPTY} });
-      if (w_d4 && b_d5 && !w_e5) return pick({ {"e4","e5",EMPTY} });
-
-      // desarrollo “fuerte” pero razonable (sin rarezas)
-      return pick({
-        {"g1","f3",EMPTY},
-        {"b1","c3",EMPTY},
-        {"f1","d3",EMPTY},
-        {"c2","c3",EMPTY},
-        {"e1","g1",EMPTY}
-      });
-    }
-
-    // vs ...e5: Italiano con d4 temprano (agresivo pero sano)
-    if (w_e4 && b_e5) {
-      // Nf3, Bc4, d4 (si existe), O-O, Nc3
-      if (has("g1",(int8_t)KNIGHT)) return pick({ {"g1","f3",EMPTY} });
-      if (has("f1",(int8_t)BISHOP)) return pick({ {"f1","c4",EMPTY} });
-
-      // d4 como plan agresivo (si todavía está el peón en d2)
-      if (has("d2",(int8_t)PAWN) && !w_d4) return pick({ {"d2","d4",EMPTY} });
-
-      return pick({
-        {"e1","g1",EMPTY},
-        {"b1","c3",EMPTY},
-        {"d2","d3",EMPTY}
-      });
-    }
-
-    // Si por transposición abriste d4: Queen’s Gambit setup agresivo-lite
-    if (w_d4) {
-      if (!w_c4) return pick({ {"c2","c4",EMPTY} });
-      return pick({
-        {"g1","f3",EMPTY},
-        {"b1","c3",EMPTY},
-        {"e2","e3",EMPTY},
-        {"f1","d3",EMPTY},
-        {"e1","g1",EMPTY}
-      });
-    }
-
-    return false;
-  }
-
-  // =========================
-  // NEGRAS (sólido/pasivo)
-  // =========================
-  // vs 1.e4: Caro-Kann sólido
-  if (w_e4) {
-    if (!b_c6 && has("c7",(int8_t)(-PAWN))) return pick({ {"c7","c6",EMPTY} });
-    if (b_c6) {
-      if (w_d4 && !b_d5 && has("d7",(int8_t)(-PAWN))) return pick({ {"d7","d5",EMPTY} });
-      if (!b_e6 && has("e7",(int8_t)(-PAWN))) return pick({ {"e7","e6",EMPTY} });
-
-      // desarrollo y enroque (sin ...c5 temprana)
-      return pick({
-        {"g8","f6",EMPTY},
-        {"b8","d7",EMPTY},
-        {"f8","e7",EMPTY},
-        {"e8","g8",EMPTY}
-      });
-    }
-    return false;
-  }
-
-  // vs 1.d4: QGD/Semi-Slav sólido
-  if (w_d4) {
-    if (!b_d5 && has("d7",(int8_t)(-PAWN))) return pick({ {"d7","d5",EMPTY} });
-    if (w_c4 && !b_e6 && has("e7",(int8_t)(-PAWN))) return pick({ {"e7","e6",EMPTY} });
-
-    // desarrollo y enroque
-    if (pick({ {"g8","f6",EMPTY} })) return true;
-    if (pick({ {"f8","e7",EMPTY} })) return true;
-    if (pick({ {"e8","g8",EMPTY} })) return true;
-
-    // Semi-Slav: ...c6
-    if (has("c7",(int8_t)(-PAWN))) return pick({ {"c7","c6",EMPTY} });
-
-    return pick({
-      {"b8","d7",EMPTY},
-      {"b8","c6",EMPTY}
-    });
-  }
-
-  return false;
-}
-
-
-
-
 // ---------------- UCI helpers ----------------
 static vector<string> split_ws(const string& s) {
   istringstream iss(s);
@@ -899,9 +752,11 @@ static bool apply_uci_move(Board& b, const string& uci) {
   return false;
 }
 
-static void uci_position(Board& b, const string& line) {
+static void uci_position(Board& b, const string& line, vector<string>& move_history) {
   auto tok = split_ws(line);
   if (tok.size() < 2) return;
+
+  move_history.clear();
 
   size_t i = 1;
   if (tok[i] == "startpos") {
@@ -916,8 +771,18 @@ static void uci_position(Board& b, const string& line) {
 
   if (i < tok.size() && tok[i] == "moves") {
     i++;
-    for (; i < tok.size(); i++) apply_uci_move(b, tok[i]);
+    for (; i < tok.size(); i++) {
+      if (apply_uci_move(b, tok[i])) move_history.push_back(tok[i]);
+    }
   }
+}
+
+static bool has_critical_tactics(Board& b, const vector<Move>& legal) {
+  if (b.in_check(b.side)) return true;
+  for (const auto& m : legal) {
+    if ((m.flags & Move::CAPTURE) || m.promo != EMPTY) return true;
+  }
+  return false;
 }
 
 struct GoParams {
@@ -1389,6 +1254,7 @@ int main(int argc, char** argv) {
   // UCI mode
   Board board;
   board.set_startpos();
+  vector<string> move_history;
 
   string line;
   while (getline(cin, line)) {
@@ -1404,6 +1270,7 @@ int main(int argc, char** argv) {
     }
     else if (line == "ucinewgame") {
       board.set_startpos();
+      move_history.clear();
     }
     else if (line.rfind("setoption name Hash value", 0) == 0) {
       auto tok = split_ws(line);
@@ -1412,7 +1279,7 @@ int main(int argc, char** argv) {
       TT.resize_mb(mb);
     }
     else if (line.rfind("position", 0) == 0) {
-      uci_position(board, line);
+      uci_position(board, line, move_history);
     }
     else if (line.rfind("go", 0) == 0) {
       GoParams gp = parse_go(line);
@@ -1420,18 +1287,22 @@ int main(int argc, char** argv) {
       int maxDepth = (gp.depth > 0 ? gp.depth : 20);
       int score = 0;
 
-      Move bookMove;
-      if (opening_policy(board, bookMove)) {
-        cout << "bestmove " << move_to_uci(bookMove) << "\n";
+      vector<Move> legal;
+      board.gen_legal(legal);
+
+      vector<string> legal_uci;
+      legal_uci.reserve(legal.size());
+      for (const auto& m : legal) legal_uci.push_back(move_to_uci(m));
+
+      auto book_move = opening_book_pick(move_history, legal_uci);
+      if (book_move && !has_critical_tactics(board, legal)) {
+        cout << "bestmove " << *book_move << "\n";
         continue;
       }
 
       Move bm = search_bestmove(board, movetime, maxDepth, score);
 
       // Validate best move exists; if none, 0000
-      vector<Move> legal;
-      board.gen_legal(legal);
-
       string out = "0000";
       for (auto &m : legal) {
         if (m.from == bm.from && m.to == bm.to && m.promo == bm.promo) {

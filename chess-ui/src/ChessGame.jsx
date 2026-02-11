@@ -86,6 +86,10 @@ export default function ChessGame() {
     const t = game.turn(); // "w" o "b"
     if (t === playerColor) return;
 
+    const timeoutMs = Math.max(movetimeMs + 1500, 2500);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     setThinking(true);
     setThinkingStartedAt(Date.now());
     setEngineStatus({ depth: null, score: null, pv: "", lastInfoAt: null });
@@ -129,8 +133,13 @@ export default function ChessGame() {
 
       if (!result) {
         console.warn("Bot move inválido en UI:", uci, "fen:", game.fen());
+        setEngineError("El motor no respondió, reintentá");
+        return;
       }
       sync();
+    } catch (error) {
+      console.error("Error consultando al motor:", error);
+      setEngineError("El motor no respondió, reintentá");
     } finally {
       keepPolling = false;
       if (pollTimer) clearTimeout(pollTimer);
@@ -165,6 +174,7 @@ export default function ChessGame() {
   function newGame(color) {
     game.reset();
     setPlayerColor(color);
+    setEngineError("");
     sync();
   }
 
@@ -223,6 +233,30 @@ export default function ChessGame() {
         {noProgressReported ? (
           <div style={{ marginTop: 6, fontSize: 12, color: "#b45309" }}>sin progreso reportado</div>
         ) : null}
+      {engineError && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: 12,
+            borderRadius: 8,
+            background: "#ffe8e8",
+            border: "1px solid #ffb3b3",
+          }}
+        >
+          <div style={{ marginBottom: 8, color: "#8a1f11", fontWeight: 600 }}>{engineError}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={botPlayIfNeeded} disabled={thinking || game.isGameOver()}>
+              Reintentar jugada del bot
+            </button>
+            <button onClick={() => newGame(playerColor)} disabled={thinking}>
+              Nueva partida
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
+        FEN: {fen}
       </div>
 
       <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>FEN: {fen}</div>
