@@ -81,10 +81,12 @@ export default function ChessGame() {
   const [engineStatus, setEngineStatus] = useState({ depth: null, score: null, pv: "", lastInfoAt: null });
   const [engineError, setEngineError] = useState("");
   const [showHint, setShowHint] = useState(true);
+  const [hintLines, setHintLines] = useState(2);
   const [hintData, setHintData] = useState({ best: null, lines: [] });
 
   const inFlightControllersRef = useRef(new Set());
   const prefetchCacheRef = useRef(new Map());
+  const hintRequestSeqRef = useRef(0);
 
   const turn = fen.split(" ")[1];
   const isPlayersTurn = turn === playerColor;
@@ -120,6 +122,7 @@ export default function ChessGame() {
   }
 
   function abortAllRequests() {
+    hintRequestSeqRef.current += 1;
     for (const controller of inFlightControllersRef.current) controller.abort();
     inFlightControllersRef.current.clear();
   }
@@ -135,7 +138,10 @@ export default function ChessGame() {
       return;
     }
 
+    const requestSeq = ++hintRequestSeqRef.current;
     const historyUci = historyToUci(game);
+    const fenAtRequest = game.fen();
+    const shouldSkipPrefetch = hintLines < 2;
     const hintController = new AbortController();
     const cleanupHint = addController(hintController);
 
@@ -143,13 +149,23 @@ export default function ChessGame() {
       const hint = await fetchHint({
         fen: game.fen(),
         movesUci: historyUci,
-        multipv: 3,
+        multipv: hintLines,
         movetimeMs: 100,
         signal: hintController.signal,
       });
-      setHintData({ best: hint.best ?? null, lines: hint.lines ?? [] });
 
-      const candidates = (hint.lines ?? []).slice(0, 3).map((line) => line.uci).filter(Boolean);
+      const fenStillMatches = game.fen() === fenAtRequest;
+      const sameHistory = makeCacheKey(fenAtRequest, historyUci) === makeCacheKey(game.fen(), historyToUci(game));
+      if (requestSeq !== hintRequestSeqRef.current || !fenStillMatches || !sameHistory || !showHint || !isPlayersTurn) {
+        return;
+      }
+
+      const topLines = (hint.lines ?? []).slice(0, hintLines);
+      setHintData({ best: hint.best ?? topLines[0]?.uci ?? null, lines: topLines });
+
+      if (shouldSkipPrefetch) return;
+
+      const candidates = topLines.map((line) => line.uci).filter(Boolean);
       for (const candidateMove of candidates) {
         const preview = new Chess(game.fen());
         const parsed = uciToMove(candidateMove);
@@ -287,6 +303,8 @@ export default function ChessGame() {
   async function onPieceDrop(sourceSquare, targetSquare) {
     if (thinking || !isPlayersTurn) return false;
 
+    abortAllRequests();
+
     const isPromotion =
       (sourceSquare[1] === "7" && targetSquare[1] === "8" && game.get(sourceSquare)?.type === "p" && playerColor === "w") ||
       (sourceSquare[1] === "2" && targetSquare[1] === "1" && game.get(sourceSquare)?.type === "p" && playerColor === "b");
@@ -311,6 +329,7 @@ export default function ChessGame() {
 
   useEffect(() => {
     (async () => {
+      abortAllRequests();
       if (game.history().length === 0) {
         await botPlayIfNeeded();
       } else {
@@ -325,9 +344,14 @@ export default function ChessGame() {
       refreshHintAndPrefetch();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fen, thinking, isPlayersTurn, showHint]);
+  }, [fen, thinking, isPlayersTurn, showHint, hintLines]);
 
-  const hintArrow = hintData.best ? [[hintData.best.slice(0, 2), hintData.best.slice(2, 4), "#2e7d32"]] : [];
+  const hintArrows = showHint && isPlayersTurn
+    ? (hintData.lines ?? [])
+        .slice(0, hintLines)
+        .filter((line) => typeof line?.uci === "string" && line.uci.length >= 4)
+        .map((line, idx) => [line.uci.slice(0, 2), line.uci.slice(2, 4), idx === 0 ? "#2e7d32" : "#1e88e5"])
+    : [];
 
   return (
     <div style={{ maxWidth: 560, margin: "24px auto", fontFamily: "system-ui" }}>
@@ -348,6 +372,14 @@ export default function ChessGame() {
           <input type="checkbox" checked={showHint} onChange={(e) => setShowHint(e.target.checked)} />
           Show Hint
         </label>
+
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          Hint Lines
+          <select value={hintLines} onChange={(e) => setHintLines(Number(e.target.value))}>
+            <option value={1}>1</option>
+            <option value={2}>2</option>
+          </select>
+        </label>
       </div>
 
       <div style={{ marginBottom: 12, fontSize: 13, lineHeight: 1.35, opacity: 0.92 }}>
@@ -365,19 +397,23 @@ export default function ChessGame() {
         onPieceDrop={onPieceDrop}
         boardOrientation={playerColor === "w" ? "white" : "black"}
         arePiecesDraggable={!thinking && isPlayersTurn}
-        customArrows={showHint ? hintArrow : []}
+        customArrows={hintArrows}
       />
 
       {showHint && isPlayersTurn ? (
         <div style={{ marginTop: 12, fontSize: 13 }}>
           <b>Coach (Stockfish)</b>
-          <ul style={{ marginTop: 6, paddingLeft: 18 }}>
-            {(hintData.lines ?? []).slice(0, 3).map((line, idx) => (
-              <li key={`${line.uci}-${idx}`}>
-                {line.uci} | cp {line.scoreCp ?? "?"} | pv {(line.pvMoves ?? []).slice(0, 6).join(" ")}
-              </li>
-            ))}
-          </ul>
+          {(hintData.lines ?? []).length === 0 ? (
+            <div style={{ marginTop: 6, opacity: 0.8 }}>Sin hint disponible.</div>
+          ) : (
+            <ul style={{ marginTop: 6, paddingLeft: 18 }}>
+              {(hintData.lines ?? []).slice(0, hintLines).map((line, idx) => (
+                <li key={`${line.uci}-${idx}`}>
+                  {line.uci} | cp {line.scoreCp ?? "?"} | pv {(line.pvMoves ?? []).slice(0, 6).join(" ")}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       ) : null}
 
