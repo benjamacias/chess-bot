@@ -81,7 +81,7 @@ export default function ChessGame() {
   const [engineStatus, setEngineStatus] = useState({ depth: null, score: null, pv: "", lastInfoAt: null });
   const [engineError, setEngineError] = useState("");
   const [showHint, setShowHint] = useState(true);
-  const [hintLines, setHintLines] = useState(2);
+  const [hintLines, setHintLines] = useState(3);
   const [hintData, setHintData] = useState({ best: null, lines: [] });
 
   const inFlightControllersRef = useRef(new Set());
@@ -390,6 +390,12 @@ export default function ChessGame() {
           <select value={hintLines} onChange={(e) => setHintLines(Number(e.target.value))}>
             <option value={1}>1</option>
             <option value={2}>2</option>
+            <option value={3}>3</option>
+            <option value={4}>4</option>
+            <option value={5}>5</option>
+            <option value={6}>6</option>
+            <option value={7}>7</option>
+            <option value={8}>8</option>
           </select>
         </label>
       </div>

@@ -29,7 +29,23 @@ function resolveEnginePath() {
 }
 
 const ENGINE_PATH = resolveEnginePath();
-const STOCKFISH_PATH = process.env.STOCKFISH_PATH || "stockfish";
+function resolveStockfishPath() {
+  if (process.env.STOCKFISH_PATH) return process.env.STOCKFISH_PATH;
+
+  const absoluteCandidates = [
+    "/usr/games/stockfish",
+    "/usr/bin/stockfish",
+    "/snap/bin/stockfish",
+  ];
+
+  for (const candidate of absoluteCandidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return "stockfish";
+}
+
+const STOCKFISH_PATH = resolveStockfishPath();
 
 const MOVE_TIMEOUT_MS = 5000;
 const HINT_TIMEOUT_MS = 4000;
@@ -451,7 +467,7 @@ app.post("/api/hint", async (req, res) => {
     return res.status(400).json({ error: "invalid moves_uci", code: "INVALID_MOVES_UCI" });
   }
 
-  const multipv = Math.min(5, Math.max(1, toPositiveInt(req.body?.multipv) ?? 2));
+  const multipv = Math.min(8, Math.max(1, toPositiveInt(req.body?.multipv) ?? 3));
   const movetimeMs = Math.min(2000, Math.max(50, toPositiveInt(req.body?.movetime_ms) ?? 120));
   const requestId = randomUUID();
 
