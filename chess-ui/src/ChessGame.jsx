@@ -42,7 +42,11 @@ function createRequestId() {
   return `req-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 }
 
-async function fetchBotMove(fen, options, requestId) {
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+async function fetchBotMove(fen, options, requestId, signal) {
   const { skill, movetime_ms, depth, hash_mb } = options;
   const res = await fetch("/api/move", {
     method: "POST",
@@ -50,6 +54,7 @@ async function fetchBotMove(fen, options, requestId) {
       "Content-Type": "application/json",
       "x-request-id": requestId,
     },
+    signal,
     body: JSON.stringify({ fen, skill, movetime_ms, depth, hash_mb }),
   });
   if (!res.ok) throw new Error(`api/move failed: ${res.status}`);
@@ -85,6 +90,7 @@ export default function ChessGame() {
   const [thinkingStartedAt, setThinkingStartedAt] = useState(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [engineStatus, setEngineStatus] = useState({ depth: null, score: null, pv: "", lastInfoAt: null });
+  const [engineError, setEngineError] = useState("");
 
   const turn = fen.split(" ")[1]; // "w" o "b"
   const isPlayersTurn = turn === playerColor;
@@ -125,6 +131,7 @@ export default function ChessGame() {
     setThinking(true);
     setThinkingStartedAt(Date.now());
     setEngineStatus({ depth: null, score: null, pv: "", lastInfoAt: null });
+    setEngineError("");
 
     const requestId = createRequestId();
     let pollTimer = null;
@@ -161,9 +168,13 @@ export default function ChessGame() {
           depth: levelPreset.depth,
           hash_mb: levelPreset.hashMb,
         },
-        requestId
+        requestId,
+        controller.signal
       );
-      if (!uci) return;
+      if (!uci) {
+        setEngineError("No se pudo obtener una jugada del motor. Intentá nuevamente.");
+        return;
+      }
 
       const mv = uciToMove(uci);
       // Si el bot promociona sin letra, default a reina
@@ -175,16 +186,21 @@ export default function ChessGame() {
 
       if (!result) {
         console.warn("Bot move inválido en UI:", uci, "fen:", game.fen());
-        setEngineError("El motor no respondió, reintentá");
+        setEngineError("El motor devolvió una jugada inválida. Reintentá.");
         return;
       }
       sync();
     } catch (error) {
       console.error("Error consultando al motor:", error);
-      setEngineError("El motor no respondió, reintentá");
+      if (error?.name === "AbortError") {
+        setEngineError("El motor tardó demasiado en responder. Reintentá.");
+      } else {
+        setEngineError("No se pudo consultar al motor. Reintentá.");
+      }
     } finally {
       keepPolling = false;
       if (pollTimer) clearTimeout(pollTimer);
+      clearTimeout(timeoutId);
       setThinking(false);
     }
   }
@@ -264,6 +280,12 @@ export default function ChessGame() {
         ) : null}
         . Mayor precisión implica más tiempo de respuesta.
       </div>
+
+      {engineError ? (
+        <div style={{ marginBottom: 12, color: "#b00020", fontSize: 13 }} role="alert">
+          {engineError}
+        </div>
+      ) : null}
 
       <Chessboard
         position={fen}
