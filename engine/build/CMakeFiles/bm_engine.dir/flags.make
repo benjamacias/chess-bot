@@ -6,5 +6,5 @@ CXX_DEFINES =
 
 CXX_INCLUDES = 
 
-CXX_FLAGS = -std=gnu++20 -O3 -march=native
+CXX_FLAGS = -O3 -DNDEBUG -std=gnu++20 -O3 -march=native
 

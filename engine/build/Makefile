@@ -153,6 +153,30 @@ main.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bm_engine.dir/build.make CMakeFiles/bm_engine.dir/main.cpp.s
 .PHONY : main.cpp.s
 
+opening_book_improved.o: opening_book_improved.cpp.o
+.PHONY : opening_book_improved.o
+
+# target to build an object file
+opening_book_improved.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bm_engine.dir/build.make CMakeFiles/bm_engine.dir/opening_book_improved.cpp.o
+.PHONY : opening_book_improved.cpp.o
+
+opening_book_improved.i: opening_book_improved.cpp.i
+.PHONY : opening_book_improved.i
+
+# target to preprocess a source file
+opening_book_improved.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bm_engine.dir/build.make CMakeFiles/bm_engine.dir/opening_book_improved.cpp.i
+.PHONY : opening_book_improved.cpp.i
+
+opening_book_improved.s: opening_book_improved.cpp.s
+.PHONY : opening_book_improved.s
+
+# target to generate assembly for a file
+opening_book_improved.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bm_engine.dir/build.make CMakeFiles/bm_engine.dir/opening_book_improved.cpp.s
+.PHONY : opening_book_improved.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -165,6 +189,9 @@ help:
 	@echo "... main.o"
 	@echo "... main.i"
 	@echo "... main.s"
+	@echo "... opening_book_improved.o"
+	@echo "... opening_book_improved.i"
+	@echo "... opening_book_improved.s"
 .PHONY : help
 
 

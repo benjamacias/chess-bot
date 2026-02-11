@@ -1153,6 +1153,18 @@ static Move search_bestmove(Board& b, int movetime_ms, int maxDepth, int& outSco
   int prev = 0;                 // score del depth anterior para aspiration
   const int WINDOW = 80;      // centipawns (50-80 suele ir bien)
 
+  vector<Move> root;
+  b.gen_legal(root);
+  if (root.empty()) {
+    outScoreCp = 0;
+    return Move{}; // terminal real
+  }
+
+  // fallback: siempre una jugada legal
+  best = root[0];
+  bestEnc = encode_move(best);
+  bestScore = 0;
+
   for (int depth = 1; depth <= maxDepth; depth++) {
     if (st.time_up()) break;
 
@@ -1161,14 +1173,14 @@ static Move search_bestmove(Board& b, int movetime_ms, int maxDepth, int& outSco
       alpha = prev - WINDOW;
       beta  = prev + WINDOW;
     }
-       uint32_t pv = 0;
+    uint32_t pv = bestEnc;  // fallback: si corta por tiempo, no perdés PV
     int score = negamax(b, depth, alpha, beta, st, 0, pv);
 
     // si falla la ventana y aún hay tiempo, re-search con ventana completa
     if (!st.time_up() && depth >= 2) {
       if (score <= alpha || score >= beta) {
-        pv = 0;
-        score = negamax(b, depth, -INF, INF, st, 0, pv);
+      pv = bestEnc;           // mismo motivo: no borres el PV
+      score = negamax(b, depth, -INF, INF, st, 0, pv);
       }
     }
 
@@ -1305,13 +1317,22 @@ int main(int argc, char** argv) {
       Move bm = search_bestmove(board, movetime, maxDepth, score);
 
       // Validate best move exists; if none, 0000
-      string out = "0000";
+      string out = legal.empty() ? "0000" : move_to_uci(legal[0]); // fallback legal
+      bool matched = false;
+
       for (auto &m : legal) {
         if (m.from == bm.from && m.to == bm.to && m.promo == bm.promo) {
           out = move_to_uci(m);
+          matched = true;
           break;
         }
       }
+
+      // Si no matcheó pero había legales, NO es terminal. Solo fue “bestmove inválido”.
+      if (!matched && !legal.empty()) {
+        cout << "info string fallback_bestmove_used\n";
+      }
+
       cout << "bestmove " << out << "\n";
     }
     else if (line == "quit") {

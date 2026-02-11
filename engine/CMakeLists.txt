@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(bm_engine
   main.cpp
-  opening_book.cpp
+  opening_book_improved.cpp
 )
 
 # Optimización (si querés debug, cambiá a -O0 -g)

@@ -1,1 +1,1 @@
-/usr/bin/c++ CMakeFiles/bm_engine.dir/main.cpp.o -o bm_engine 
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/bm_engine.dir/main.cpp.o CMakeFiles/bm_engine.dir/opening_book_improved.cpp.o -o bm_engine 
