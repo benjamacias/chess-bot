@@ -126,17 +126,42 @@ function waitFor(predicate, timeoutMs = 3000, requestId = "system") {
   });
 }
 
+function terminalReasonFromInfo(lastInfo) {
+  if (lastInfo?.score?.type === "mate") return "CHECKMATE";
+  return "NO_LEGAL_MOVES";
+}
+
+function serializeBestmove(state) {
+  const rawBestmove = state?.bestmove ?? null;
+  const uci = rawBestmove && rawBestmove !== "0000" ? rawBestmove : null;
+  const terminal = rawBestmove === "0000";
+
+  return {
+    uci,
+    terminal,
+    reason: terminal ? terminalReasonFromInfo(state?.lastInfo) : null,
+    depth: state?.lastInfo?.depth ?? null,
+    score: state?.lastInfo?.score ?? null,
+    pv: state?.lastInfo?.pv ?? "",
+  };
+}
+
 function serializeState(state) {
+  const bestmove = serializeBestmove(state);
+
   return {
     id: state.id,
     active: state.active,
     startedAt: state.startedAt,
     finishedAt: state.finishedAt,
     lastInfoAt: state.lastInfoAt,
-    depth: state.lastInfo?.depth ?? null,
-    score: state.lastInfo?.score ?? null,
-    pv: state.lastInfo?.pv ?? "",
-    bestmove: state.bestmove && state.bestmove !== "0000" ? state.bestmove : null,
+    depth: bestmove.depth,
+    score: bestmove.score,
+    pv: bestmove.pv,
+    uci: bestmove.uci,
+    terminal: bestmove.terminal,
+    reason: bestmove.reason,
+    bestmove: bestmove.uci,
     error: state.error ?? null,
   };
 }
@@ -247,10 +272,16 @@ app.post("/api/move", async (req, res) => {
       const best = await waitFor((l) => l.startsWith("bestmove "), bestTimeout, requestId);
       const uci = best.split(/\s+/)[1] ?? "0000";
 
-      return { uci: uci === "0000" ? null : uci };
+      state.bestmove = uci;
+      state.active = false;
+      state.finishedAt = Date.now();
+
+      return serializeBestmove(state);
     });
 
-    console.log(`[${requestId}] move:done bestmove=${result.uci ?? "null"} timeout=false`);
+    console.log(
+      `[${requestId}] move:done bestmove=${result.uci ?? "null"} terminal=${result.terminal} timeout=false`
+    );
     return res.json(result);
   } catch (e) {
     const timeout = e?.message === "engine timeout";
